@@ -118,3 +118,15 @@ async def test_sticker_gets_unsupported_reply_and_goes_into_ticket(s, clock_):
     ]
     m = await s.scalar(select(Message))
     assert m.ticket_id == 1 and m.text == "[стикер]"
+
+
+async def test_messages_during_intake_join_ticket_but_answers_do_not(s, clock_):
+    await _feed(s, "Не печатает принтер", "1")
+    photo = incoming(None, mid="P1", kind="image", download_url="u", file_name="a.jpg")
+    await handle_incoming(s, photo, "/f/a.jpg")  # вместо имени — фото
+    await handle_incoming(s, incoming("А", mid="P2"), None)  # слишком короткое имя
+    await handle_incoming(s, incoming("Айгерим", mid="P3"), None)
+    await handle_incoming(s, incoming("Бухгалтерия", mid="P4"), None)
+    t = await s.scalar(select(Ticket))
+    q = select(Message.wa_message_id).where(Message.ticket_id == t.id).order_by(Message.id)
+    assert (await s.scalars(q)).all() == ["M0", "P1", "P2"]

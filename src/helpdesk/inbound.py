@@ -37,8 +37,10 @@ async def handle_incoming(s, msg: IncomingMessage, file_path: str | None) -> Non
         await s.flush()
         return
     if client.intake_step != "done":
-        _save(s, client, msg, file_path, intake_answer=True)
-        if intake.advance(s, client, msg):
+        step = intake.advance(s, client, msg)
+        # в заявку не попадают только принятые ответы анкеты (спец. §4.2)
+        _save(s, client, msg, file_path, intake_answer=step.consumed)
+        if step.done:
             await s.flush()
             await tickets.on_client_message(s, client, None)
         await s.flush()

@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 from helpdesk import texts
 from helpdesk.db.models import Client
 from helpdesk.delivery import outbox
@@ -33,30 +35,38 @@ def _say(s, client: Client, key: str) -> None:
     outbox.wa_text(s, client.wa_chat_id, texts.t(client.lang, key))
 
 
-def advance(s, client: Client, msg: IncomingMessage) -> bool:
+class Step(NamedTuple):
+    consumed: bool  # сообщение принято как ответ на вопрос анкеты
+    done: bool  # анкета завершена
+
+
+_REJECTED = Step(consumed=False, done=False)
+
+
+def advance(s, client: Client, msg: IncomingMessage) -> Step:
     text = (msg.text or "").strip() if msg.kind == "text" else ""
     if client.intake_step == "lang":
         lang = parse_lang(text)
         if lang is None:
             start(s, client)
-            return False
+            return _REJECTED
         client.lang = lang
         client.intake_step = "name"
         _say(s, client, "ask_name")
-        return False
+        return Step(consumed=True, done=False)
     if client.intake_step == "name":
         if not 2 <= len(text) <= 100:
             _say(s, client, "bad_name")
-            return False
+            return _REJECTED
         client.full_name = text
         client.intake_step = "location"
         _say(s, client, "ask_location")
-        return False
+        return Step(consumed=True, done=False)
     if client.intake_step == "location":
         if not 1 <= len(text) <= 200:
             _say(s, client, "bad_location")
-            return False
+            return _REJECTED
         client.location = text
         client.intake_step = "done"
-        return True
-    return True
+        return Step(consumed=True, done=True)
+    return Step(consumed=False, done=True)
