@@ -172,7 +172,7 @@ def render_stats(st: Stats, title: str) -> str:
 
 def parse_ticket_id(q: str) -> int | None:
     q = q.strip().lstrip("#")
-    return int(q) if q.isdigit() and len(q) <= 6 else None
+    return int(q) if q.isascii() and q.isdigit() and len(q) <= 6 else None
 
 
 async def search(s, q: str, limit: int = 10) -> list[tuple[Ticket, Client, str | None]]:

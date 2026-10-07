@@ -94,6 +94,7 @@ def test_parse_ticket_id():
     assert stats.parse_ticket_id("#12") == 12 and stats.parse_ticket_id(" 125 ") == 125
     assert stats.parse_ticket_id("87011234567") is None
     assert stats.parse_ticket_id("Айгерим") is None
+    assert stats.parse_ticket_id("²") is None and stats.parse_ticket_id("١٢") is None
 
 
 async def test_search(s, clock_):

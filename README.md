@@ -18,7 +18,7 @@
    - `TELEGRAM_BOT_TOKEN` — токен от @BotFather;
    - `ADMIN_TG_IDS` — ваш Telegram ID (узнать у @userinfobot), через запятую;
    - `GREEN_API_ID_INSTANCE`, `GREEN_API_TOKEN`, `GREEN_API_URL`, `GREEN_API_MEDIA_URL` — из личного кабинета Green API (apiUrl и mediaUrl инстанса);
-   - `POSTGRES_PASSWORD` — любой длинный пароль.
+   - `POSTGRES_PASSWORD` — длинный пароль только из латинских букв и цифр (он подставляется в `DATABASE_URL`, спецсимволы вроде `@`, `:`, `/` сломают адрес).
 3. `mkdir -p data backups && sudo chown 999:999 backups` (сервис бэкапа пишет от uid 999).
 4. Green API: в кабинете отсканировать QR телефоном рабочего номера. В настройках инстанса включить
    «Получать уведомления о входящих сообщениях и файлах», поле Webhook URL оставить **пустым**.
