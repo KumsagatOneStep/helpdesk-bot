@@ -320,3 +320,16 @@ async def recent_view(s, t: Ticket, limit: int = 5) -> str:
 
 async def link(s, chat_id: int, message_id: int, ticket_id: int) -> None:
     await s.merge(TgLink(tg_chat_id=chat_id, tg_message_id=message_id, ticket_id=ticket_id))
+
+
+async def deliver_queue_to(s, staff: Staff) -> int:
+    q = (
+        select(Ticket, Client)
+        .join(Client, Client.id == Ticket.client_id)
+        .where(Ticket.status == "new")
+        .order_by(Ticket.id)
+    )
+    rows = (await s.execute(q)).all()
+    for t, c in rows:
+        _send_cards(s, t, c, await ticket_messages(s, t.id), staff)
+    return len(rows)
