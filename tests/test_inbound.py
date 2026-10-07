@@ -151,3 +151,11 @@ async def test_messages_during_intake_join_ticket_but_answers_do_not(s, clock_):
     t = await s.scalar(select(Ticket))
     q = select(Message.wa_message_id).where(Message.ticket_id == t.id).order_by(Message.id)
     assert (await s.scalars(q)).all() == ["M0", "P1", "P2"]
+
+
+async def test_nul_characters_are_stripped(s, clock_):
+    await make_client(s)
+    msg = incoming("прин\x00тер", mid="N1", kind="document", file_name="a\x00.pdf")
+    await handle_incoming(s, msg, "/f/a.pdf")
+    m = await s.scalar(select(Message))
+    assert (m.text, m.file_name) == ("принтер", "a.pdf")

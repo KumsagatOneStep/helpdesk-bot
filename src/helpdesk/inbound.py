@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from sqlalchemy import select
 
 from helpdesk import texts
@@ -23,7 +25,18 @@ def _save(s, client: Client, msg: IncomingMessage, file_path: str | None, *, int
     return m
 
 
+def _no_nul(v: str | None) -> str | None:
+    return v.replace("\x00", "") if v else v
+
+
 async def handle_incoming(s, msg: IncomingMessage, file_path: str | None) -> None:
+    # PostgreSQL text не хранит NUL — иначе сообщение терялось бы после повторов
+    msg = replace(
+        msg,
+        text=_no_nul(msg.text),
+        file_name=_no_nul(msg.file_name),
+        sender_name=_no_nul(msg.sender_name),
+    )
     dup = await s.scalar(select(Message.id).where(Message.wa_message_id == msg.wa_message_id))
     if dup is not None:
         return
