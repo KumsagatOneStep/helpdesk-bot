@@ -16,6 +16,10 @@ log = structlog.get_logger()
 RETRY_DELAYS = [5, 30, 120, 600, 1800]
 
 
+class PermanentSendError(Exception):
+    """Повтор не поможет (бот заблокирован, файл отвергнут) — сразу failed."""
+
+
 class WaSender(Protocol):
     async def send_text(self, chat_id: str, text: str) -> str: ...
 
@@ -89,7 +93,7 @@ async def _process_one(sf, wa, tg, item_id: int) -> None:
             await s.refresh(item)  # откат savepoint мог сделать объект устаревшим
             item.attempts += 1
             item.last_error = str(e)[:1000]
-            if item.attempts > len(RETRY_DELAYS):
+            if isinstance(e, PermanentSendError) or item.attempts > len(RETRY_DELAYS):
                 item.status = "failed"
                 await _on_failed(s, item)
             else:

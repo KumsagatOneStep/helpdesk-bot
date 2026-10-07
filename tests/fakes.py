@@ -26,11 +26,16 @@ class FakeTg:
         self.deleted: list[tuple] = []
         self.fail_send = False
         self.fail_delete = False
+        self.permanent_fail_texts: set[str] = set()
         self._mid = 1000
 
     async def send(self, chat_id, *, text, file_path, file_kind, buttons):
         if self.fail_send:
             raise RuntimeError("tg down")
+        if text in self.permanent_fail_texts:
+            from helpdesk.delivery.worker import PermanentSendError
+
+            raise PermanentSendError("Forbidden: bot was blocked by the user")
         self._mid += 1
         self.sent.append(
             dict(

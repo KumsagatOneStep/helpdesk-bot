@@ -195,3 +195,17 @@ async def test_take_during_card_send_sees_the_new_card(sf, clock_):
     async with sf() as s:
         card = await s.scalar(select(TgCard).where(TgCard.staff_id != timur_id))
         assert card.state == "deleting"
+
+
+async def test_permanent_tg_error_fails_at_once_and_unblocks_chat(sf, clock_):
+    async with sf() as s, s.begin():
+        outbox.tg_send(s, 1, text="огромный файл")
+        outbox.tg_send(s, 1, text="следующее")
+    tg = FakeTg()
+    tg.permanent_fail_texts = {"огромный файл"}
+    await drain(sf, FakeWa(), tg)
+    assert [m["text"] for m in tg.sent] == ["следующее"]
+    async with sf() as s:
+        first = await s.scalar(select(Outbox).order_by(Outbox.id))
+        assert (first.status, first.attempts) == ("failed", 1)
+        assert "blocked" in first.last_error
