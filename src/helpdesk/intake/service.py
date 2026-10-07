@@ -1,3 +1,4 @@
+import re
 from typing import NamedTuple
 
 from helpdesk import texts
@@ -5,26 +6,18 @@ from helpdesk.db.models import Client
 from helpdesk.delivery import outbox
 from helpdesk.whatsapp.parse import IncomingMessage
 
-_LANGS = {
-    "1": "ru",
-    "ru": "ru",
-    "рус": "ru",
-    "русский": "ru",
-    "2": "kk",
-    "kk": "kk",
-    "kz": "kk",
-    "kaz": "kk",
-    "каз": "kk",
-    "қаз": "kk",
-    "қазақша": "kk",
-    "казахский": "kk",
-}
+_DIGITS = re.compile(r"([12])(?!\d)")
+_PREFIXES = {"ru": "ru", "рус": "ru", "ka": "kk", "kz": "kk", "kk": "kk", "каз": "kk", "қаз": "kk"}
 
 
 def parse_lang(text: str | None) -> str | None:
-    if not text:
-        return None
-    return _LANGS.get(text.strip().lower().rstrip("."))
+    t = (text or "").strip().lower()
+    if m := _DIGITS.match(t):
+        return "ru" if m.group(1) == "1" else "kk"
+    for prefix, lang in _PREFIXES.items():
+        if t.startswith(prefix):
+            return lang
+    return None
 
 
 def start(s, client: Client) -> None:

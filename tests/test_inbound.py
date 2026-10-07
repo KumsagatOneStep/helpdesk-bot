@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import func, select
 
 from helpdesk import texts
@@ -35,6 +36,26 @@ def test_parse_lang():
     assert parse_lang(" 1 ") == "ru" and parse_lang("Рус") == "ru"
     assert parse_lang("2") == "kk" and parse_lang("қазақша") == "kk" and parse_lang("KZ") == "kk"
     assert parse_lang("3") is None and parse_lang(None) is None
+
+
+@pytest.mark.parametrize(
+    "text,lang",
+    [
+        ("1)", "ru"),
+        ("Rus", "ru"),
+        ("русский язык", "ru"),
+        ("1. Русский", "ru"),
+        ("казакша", "kk"),
+        ("Kazakh", "kk"),
+        ("2)", "kk"),
+        ("Қазақ тілі", "kk"),
+        ("12", None),
+        ("привет", None),
+        ("!!!", None),
+    ],
+)
+def test_parse_lang_prefixes(text, lang):
+    assert parse_lang(text) == lang
 
 
 async def test_full_intake_ru_creates_ticket_with_first_message(s, clock_):
