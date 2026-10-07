@@ -33,8 +33,10 @@ def parse_notification(body: dict) -> IncomingMessage | None:
     if body.get("typeWebhook") != "incomingMessageReceived":
         return None
     sender = body.get("senderData") or {}
-    chat_id = sender.get("chatId", "")
-    if not chat_id.endswith("@c.us"):
+    chat_id = sender.get("chatId") or ""
+    if not isinstance(chat_id, str) or not chat_id.endswith("@c.us"):
+        return None
+    if not body.get("idMessage"):
         return None
     md = body.get("messageData") or {}
     tm = md.get("typeMessage")

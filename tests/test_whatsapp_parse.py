@@ -85,3 +85,11 @@ def test_ignored_notifications():
     assert parse_notification(_body({"typeMessage": "textMessage"}, chat_id="1203@g.us")) is None
     assert parse_notification(_body({}, type_webhook="outgoingMessageReceived")) is None
     assert parse_notification({"typeWebhook": "stateInstanceChanged"}) is None
+
+
+def test_malformed_body_returns_none():
+    text = {"typeMessage": "textMessage", "textMessageData": {"textMessage": "x"}}
+    no_id = _body(text)
+    del no_id["idMessage"]
+    assert parse_notification(no_id) is None
+    assert parse_notification(_body(text, chat_id=None)) is None

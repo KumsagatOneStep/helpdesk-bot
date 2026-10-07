@@ -16,9 +16,9 @@ async def poll_once(sf, green, files_dir: str, failures: dict[int, int], retry_s
     if got is None:
         return False
     receipt_id, body = got
-    msg = parse_notification(body)
-    if msg is not None:
-        try:
+    try:
+        msg = parse_notification(body)
+        if msg is not None:
             file_path = None
             if msg.download_url:
                 try:
@@ -30,12 +30,12 @@ async def poll_once(sf, green, files_dir: str, failures: dict[int, int], retry_s
                     msg = replace(msg, text=f"{msg.text or ''} [файл не загружен]".strip())
             async with sf() as s, s.begin():
                 await inbound.handle_incoming(s, msg, file_path)
-        except Exception:
-            n = failures[receipt_id] = failures.get(receipt_id, 0) + 1
-            log.exception("inbound message failed", receipt_id=receipt_id, attempt=n)
-            if n < MAX_FAILURES:
-                await asyncio.sleep(retry_sleep)
-                return True  # не удаляем — Green API отдаст уведомление снова
+    except Exception:
+        n = failures[receipt_id] = failures.get(receipt_id, 0) + 1
+        log.exception("inbound message failed", receipt_id=receipt_id, attempt=n)
+        if n < MAX_FAILURES:
+            await asyncio.sleep(retry_sleep)
+            return True  # не удаляем — Green API отдаст уведомление снова
     await green.delete(receipt_id)
     failures.pop(receipt_id, None)
     return True

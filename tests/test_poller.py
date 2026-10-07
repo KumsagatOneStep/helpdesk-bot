@@ -80,3 +80,27 @@ async def test_download_failure_marks_text(sf, clock_, tmp_path):
     async with sf() as s:
         m = await s.scalar(select(Message))
         assert (m.text, m.file_path) == ("скрин [файл не загружен]", None)
+
+
+async def test_malformed_notification_is_dropped(sf, clock_, tmp_path):
+    no_id = _note("X")
+    del no_id["idMessage"]
+    null_chat = {**_note("Y"), "senderData": {"chatId": None}}
+    green = FakeGreen([(1, no_id), (2, null_chat)])
+    await poller.poll_once(sf, green, str(tmp_path), {})
+    await poller.poll_once(sf, green, str(tmp_path), {})
+    assert green.deleted == [1, 2] and await _count(sf, Message) == 0
+
+
+async def test_parse_crash_is_retried_then_dropped(sf, clock_, tmp_path, monkeypatch):
+    def boom(body):
+        raise KeyError("idMessage")
+
+    monkeypatch.setattr(poller, "parse_notification", boom)
+    green = FakeGreen([(7, _note("M7"))])
+    failures: dict[int, int] = {}
+    for _ in range(poller.MAX_FAILURES - 1):
+        assert await poller.poll_once(sf, green, str(tmp_path), failures, retry_sleep=0)
+        assert green.deleted == []
+    await poller.poll_once(sf, green, str(tmp_path), failures, retry_sleep=0)
+    assert green.deleted == [7] and failures == {}
