@@ -19,6 +19,9 @@ from helpdesk.tickets import render
 from helpdesk.tickets import service as tickets
 
 router = Router()
+# только личные чаты: /start в группе иначе записал бы tg_chat_id группы
+router.message.filter(F.chat.type == "private")
+router.callback_query.filter(F.message.chat.type == "private")
 
 BOT_COMMANDS = [
     ("my", "Мои заявки в работе"),

@@ -91,3 +91,37 @@ def test_router_setup_registers_handlers():
     assert len(handlers.router.message.handlers) >= 14
     assert len(handlers.router.callback_query.handlers) >= 10
     assert ("my", "Мои заявки в работе") in handlers.BOT_COMMANDS
+
+
+def _tg_message(chat_type: str):
+    from aiogram.types import Message
+
+    return Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": -100 if chat_type != "private" else 5, "type": chat_type},
+            "from": {"id": 5, "is_bot": False, "first_name": "Ерлан"},
+            "text": "/start",
+        }
+    )
+
+
+@pytest.mark.parametrize("chat_type,ok", [("private", True), ("group", False)])
+async def test_router_only_handles_private_chats(chat_type, ok):
+    from aiogram.types import CallbackQuery
+
+    msg = _tg_message(chat_type)
+    passed, _ = await handlers.router.message._handler.check(msg)
+    assert passed is ok
+    cq = CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "from": {"id": 5, "is_bot": False, "first_name": "Ерлан"},
+            "chat_instance": "x",
+            "data": "take:1",
+            "message": msg.model_dump(by_alias=True),
+        }
+    )
+    passed, _ = await handlers.router.callback_query._handler.check(cq)
+    assert passed is ok
