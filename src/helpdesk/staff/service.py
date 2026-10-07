@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from helpdesk.db import queries
-from helpdesk.db.models import Staff, Ticket
+from helpdesk.db.models import Staff, TgCard, Ticket
 from helpdesk.delivery import outbox
 from helpdesk.delivery.outbox import Buttons
 from helpdesk.tickets import service as tickets
@@ -98,6 +98,10 @@ async def set_shift(s, staff: Staff, on: bool) -> int | None:
         return None
     staff.on_shift = on
     if not on:
+        # свои карточки очереди убираем, иначе после /on придут дубли
+        q = select(TgCard).where(TgCard.staff_id == staff.id, TgCard.state == "open")
+        for card in (await s.scalars(q)).all():
+            outbox.tg_delete_card(s, card, f"#{card.ticket_id} — вы не на смене")
         return 0
     return await tickets.deliver_queue_to(s, staff)
 

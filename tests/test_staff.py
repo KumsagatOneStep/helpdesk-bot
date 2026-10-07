@@ -107,3 +107,21 @@ async def test_staff_line_and_buttons(s, clock_):
         [("⛔ Отключить", f"stf_dis:{u.id}"), ("👑 Сделать админом", f"stf_adm:{u.id}")]
     ]
     assert staff_svc.staff_buttons(admin, admin) is None
+
+
+async def test_shift_off_removes_own_queue_cards(s, clock_):
+    from sqlalchemy import select
+
+    from helpdesk.db.models import TgCard
+
+    tima = await make_staff(s, tg_id=2, name="Тимур")
+    erlan = await make_staff(s, tg_id=1, name="Ерлан")
+    t = await make_ticket(s, await make_client(s))
+    for st, mid in ((tima, 201), (erlan, 101)):
+        s.add(TgCard(ticket_id=t.id, staff_id=st.id, tg_chat_id=st.tg_chat_id, tg_message_id=mid))
+    await s.flush()
+    assert await staff_svc.set_shift(s, tima, False) == 0
+    states = dict((await s.execute(select(TgCard.tg_message_id, TgCard.state))).all())
+    assert states == {201: "deleting", 101: "open"}
+    [p] = await payloads(s, "tg")
+    assert p["op"] == "delete_card" and p["fallback_text"] == f"#{t.id} — вы не на смене"
