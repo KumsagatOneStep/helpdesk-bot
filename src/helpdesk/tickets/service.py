@@ -63,8 +63,8 @@ async def on_client_message(s, client: Client, message: Message | None) -> Ticke
     if t.status == "in_progress" and message is not None:
         staff = await s.get(Staff, t.assignee_id)
         _forward(s, staff, t, client, message)
-    elif t.status == "new":
-        await broadcast(s, t, client)
+    elif t.status == "new":  # админов уже предупредили при создании/возврате заявки
+        await broadcast(s, t, client, warn_if_empty=False)
     return t
 
 

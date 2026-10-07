@@ -124,3 +124,12 @@ async def test_nobody_on_shift_warns_admins(s, clock_):
     p = await payloads(s, "tg")
     assert len(p) == 1 and p[0]["chat_id"] == 9
     assert p[0]["text"] == f"⚠️ Заявка #{t.id}: на смене никого нет"
+
+
+async def test_nobody_on_shift_warns_admins_only_once(s, clock_):
+    c = await make_client(s)
+    await make_staff(s, tg_id=9, name="Админ", is_admin=True, on_shift=False)
+    await tickets.on_client_message(s, c, await _in(s, c))
+    await tickets.on_client_message(s, c, await _in(s, c, "ещё"))
+    await tickets.on_client_message(s, c, await _in(s, c, "и ещё"))
+    assert len(await payloads(s, "tg")) == 1
