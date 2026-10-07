@@ -48,7 +48,10 @@ async def test_approve_and_reject_require_admin(s, clock_):
     assert await staff_svc.approve(s, admin, p1.id) is None  # уже одобрен
     assert (await staff_svc.reject(s, admin, p2.id)).status == "disabled"
     texts_ = {p["chat_id"]: p["text"] for p in await payloads(s, "tg")}
-    assert texts_ == {5: "✅ Доступ открыт. /help — список команд.", 6: "Доступ отклонён."}
+    assert texts_ == {
+        5: "✅ Доступ открыт. Нажмите /start, чтобы открыть меню.",
+        6: "Доступ отклонён.",
+    }
 
 
 async def test_disable_returns_tickets_to_queue(s, clock_):

@@ -3,6 +3,8 @@ import os
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart, Filter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from helpdesk import clock
@@ -11,6 +13,7 @@ from helpdesk.db.models import Client, Staff, Ticket
 from helpdesk.staff import service as staff_svc
 from helpdesk.stats import export
 from helpdesk.stats import service as stats
+from helpdesk.telegram import menu
 from helpdesk.telegram.gateway import AiogramSender, markup
 from helpdesk.telegram.media import FileTooBig, extract_content
 from helpdesk.telegram.middleware import DbMiddleware
@@ -43,11 +46,16 @@ HELP = (
     "/export — выгрузка в Excel\n"
     "/on, /off — на смене / не на смене\n"
     "/client <№> name|location <значение> — исправить данные пользователя\n"
-    "/staff — специалисты (только админ)\n\n"
+    "/staff — специалисты (только админ)\n"
+    "То же самое — кнопками меню под полем ввода.\n\n"
     "Ответ пользователю: просто напишите сообщение (текст, фото, файл, голосовое) — "
     "оно уйдёт в активную заявку. Чтобы ответить в другую заявку, нажмите «Ответить» "
     "на её сообщение или выберите её в /my."
 )
+
+
+class SearchForm(StatesGroup):
+    query = State()
 
 
 class IsActive(Filter):
@@ -83,7 +91,7 @@ async def cmd_start(message: Message, s, settings: Settings):
         admin_ids=settings.admin_ids,
     )
     if st.status == "active":
-        await message.answer(f"Вы в системе, {st.name}.\n\n{HELP}")
+        await message.answer(f"Вы в системе, {st.name}.\n\n{HELP}", reply_markup=menu.main_menu(st))
     elif st.status == "pending":
         await message.answer("Запрос на доступ отправлен администратору. Ожидайте.")
     else:
@@ -91,25 +99,35 @@ async def cmd_start(message: Message, s, settings: Settings):
 
 
 @router.message(Command("help"), IsActive())
-async def cmd_help(message: Message):
-    await message.answer(HELP)
+async def cmd_help(message: Message, staff: Staff):
+    await message.answer(HELP, reply_markup=menu.main_menu(staff))
+
+
+@router.message(F.text == menu.CANCEL, IsActive())
+async def menu_cancel(message: Message, staff: Staff, state: FSMContext):
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=menu.main_menu(staff))
 
 
 @router.message(Command("on"), IsActive())
+@router.message(F.text == menu.SHIFT_ON, IsActive())
 async def cmd_on(message: Message, s, staff: Staff):
     n = await staff_svc.set_shift(s, staff, True)
     await message.answer(
-        "Вы уже на смене." if n is None else f"Вы на смене. Заявок в очереди: {n}."
+        "Вы уже на смене." if n is None else f"Вы на смене. Заявок в очереди: {n}.",
+        reply_markup=menu.main_menu(staff),
     )
 
 
 @router.message(Command("off"), IsActive())
+@router.message(F.text == menu.SHIFT_OFF, IsActive())
 async def cmd_off(message: Message, s, staff: Staff):
     n = await staff_svc.set_shift(s, staff, False)
     await message.answer(
         "Вы уже не на смене."
         if n is None
-        else "Вы не на смене: новые заявки приходить не будут. Заявки в работе остаются за вами."
+        else "Вы не на смене: новые заявки приходить не будут. Заявки в работе остаются за вами.",
+        reply_markup=menu.main_menu(staff),
     )
 
 
@@ -117,6 +135,7 @@ async def cmd_off(message: Message, s, staff: Staff):
 
 
 @router.message(Command("my"), IsActive())
+@router.message(F.text == menu.MY, IsActive())
 async def cmd_my(message: Message, s, staff: Staff):
     rows = await tickets.my_tickets(s, staff)
     if not rows:
@@ -183,6 +202,7 @@ async def cb_return(cq: CallbackQuery, s, staff: Staff):
 
 
 @router.message(Command("open"), IsActive())
+@router.message(F.text == menu.OPEN, IsActive())
 async def cmd_open(message: Message, s):
     await message.answer(await stats.open_tickets_text(s))
 
@@ -209,6 +229,25 @@ async def cmd_find(message: Message, command: CommandObject, s, staff: Staff):
     if not q:
         await message.answer("Использование: /find 125 | ФИО | кабинет | телефон")
         return
+    await _find(message, s, staff, q)
+
+
+@router.message(F.text == menu.SEARCH, IsActive())
+async def menu_search(message: Message, state: FSMContext):
+    await state.set_state(SearchForm.query)
+    await message.answer(
+        "Введите номер заявки, ФИО, кабинет или телефон:", reply_markup=menu.cancel_menu()
+    )
+
+
+@router.message(SearchForm.query, IsActive(), F.text.func(menu.is_client_reply_text))
+async def search_query(message: Message, s, staff: Staff, state: FSMContext):
+    await state.clear()
+    await message.answer("Ищу…", reply_markup=menu.main_menu(staff))
+    await _find(message, s, staff, message.text.strip())
+
+
+async def _find(message: Message, s, staff: Staff, q: str) -> None:
     tid = stats.parse_ticket_id(q)
     if tid is not None:
         await _send_details(message, s, staff, tid)
@@ -241,6 +280,7 @@ async def cb_chat(cq: CallbackQuery, s, bot: Bot):
 
 
 @router.message(Command("stats"), IsActive())
+@router.message(F.text == menu.STATS, IsActive())
 async def cmd_stats(message: Message):
     kb = markup([[("Сегодня", "stats:today"), ("Неделя", "stats:week"), ("Месяц", "stats:month")]])
     await message.answer("Статистика за период:", reply_markup=kb)
@@ -256,6 +296,7 @@ async def cb_stats(cq: CallbackQuery, s):
 
 
 @router.message(Command("export"), IsActive())
+@router.message(F.text == menu.EXPORT, IsActive())
 async def cmd_export(message: Message):
     kb = markup(
         [
@@ -298,6 +339,7 @@ async def cmd_client(message: Message, command: CommandObject, s):
 
 
 @router.message(Command("staff"), IsAdmin())
+@router.message(F.text == menu.STAFF, IsAdmin())
 async def cmd_staff(message: Message, s, staff: Staff):
     for st in await staff_svc.list_staff(s):
         await message.answer(
@@ -366,7 +408,7 @@ async def _reply_to_client(message: Message, s, staff: Staff, bot: Bot, settings
     await message.answer(f"→ #{t.id} {_cname(c)} ✓")
 
 
-@router.message(IsActive(), F.text, ~F.text.startswith("/"))
+@router.message(IsActive(), F.text.func(menu.is_client_reply_text))
 async def staff_text(message: Message, s, staff: Staff, bot: Bot, settings: Settings):
     await _reply_to_client(message, s, staff, bot, settings)
 

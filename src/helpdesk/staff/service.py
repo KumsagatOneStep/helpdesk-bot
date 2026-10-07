@@ -52,7 +52,7 @@ async def approve(s, admin: Staff, staff_id: int) -> Staff | None:
     if st is None or st.status != "pending":
         return None
     st.status = "active"
-    outbox.tg_send(s, st.tg_chat_id, text="✅ Доступ открыт. /help — список команд.")
+    outbox.tg_send(s, st.tg_chat_id, text="✅ Доступ открыт. Нажмите /start, чтобы открыть меню.")
     return st
 
 
