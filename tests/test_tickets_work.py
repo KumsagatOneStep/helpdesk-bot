@@ -200,3 +200,42 @@ async def test_set_active_and_my_tickets(s, clock_):
     assert [t.id for t, _ in rows] == [t1.id, t2.id]
     view = await tickets.recent_view(s, t1)
     assert view.startswith(f"▶️ Активная заявка #{t1.id} · Айгерим Сериккызы")
+
+
+async def _message_during(sf, action, status) -> tuple[int, int | None, list[dict]]:
+    """Сообщение клиента приходит, пока take/close держат заявку незакоммиченной."""
+    from helpdesk.inbound import handle_incoming
+    from tests.test_inbound import incoming
+
+    async with sf() as s, s.begin():
+        c = await make_client(s)
+        erlan = await make_staff(s, tg_id=1, name="Ерлан")
+        assignee = erlan if status == "in_progress" else None
+        tid = (await make_ticket(s, c, status=status, assignee=assignee)).id
+        await clear_outbox(s)
+
+    async def client_writes():
+        async with sf() as s2, s2.begin():
+            await handle_incoming(s2, incoming("Ещё вопрос", mid="RACE"), None)
+
+    async with sf() as s:
+        async with s.begin():
+            erlan = await s.scalar(select(Staff))
+            await action(s, tid, erlan)
+            task = asyncio.create_task(client_writes())
+            await asyncio.wait({task}, timeout=0.3)  # без блокировки успевает раньше commit
+        await task
+        m = await s.scalar(select(Message).where(Message.wa_message_id == "RACE"))
+        return tid, m.ticket_id, await payloads(s, "tg")
+
+
+async def test_message_racing_close_opens_new_ticket(sf, clock_):
+    tid, msg_tid, _ = await _message_during(sf, tickets.close_ticket, "in_progress")
+    assert msg_tid is not None and msg_tid != tid
+
+
+async def test_message_racing_take_is_forwarded_to_assignee(sf, clock_):
+    tid, msg_tid, tg = await _message_during(sf, tickets.take, "new")
+    assert msg_tid == tid
+    forwarded = [p for p in tg if p["card_staff_id"] is None and "Ещё вопрос" in p["text"]]
+    assert [p["chat_id"] for p in forwarded] == [1]

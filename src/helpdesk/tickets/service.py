@@ -20,8 +20,10 @@ def WORK_BUTTONS(tid: int):
     return [[("✅ Закрыть", f"close:{tid}"), ("↩️ Вернуть", f"ret:{tid}")]]
 
 
-async def open_ticket(s, client_id: int) -> Ticket | None:
+async def open_ticket(s, client_id: int, *, lock: bool = False) -> Ticket | None:
     q = select(Ticket).where(Ticket.client_id == client_id, Ticket.status != "closed")
+    if lock:
+        q = q.with_for_update().execution_options(populate_existing=True)
     return await s.scalar(q)
 
 
@@ -31,7 +33,8 @@ async def ticket_messages(s, ticket_id: int) -> list[Message]:
 
 
 async def on_client_message(s, client: Client, message: Message | None) -> Ticket:
-    t = await open_ticket(s, client.id)
+    # блокировка: take/close/возврат не проскочат между чтением статуса и разводкой сообщения
+    t = await open_ticket(s, client.id, lock=True)
     if t is None:
         t = Ticket(client_id=client.id)
         s.add(t)
