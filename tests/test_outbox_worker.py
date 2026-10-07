@@ -1,7 +1,10 @@
+import asyncio
+
 from sqlalchemy import select
 
-from helpdesk.db.models import Outbox, TgCard, TgLink, TicketEvent
+from helpdesk.db.models import Outbox, Staff, TgCard, TgLink, TicketEvent
 from helpdesk.delivery import outbox, worker
+from helpdesk.tickets import service as tickets
 from tests.factories import make_client, make_staff, make_ticket
 from tests.fakes import FakeTg, FakeWa
 
@@ -148,3 +151,47 @@ async def test_tg_edit_is_sent(sf, clock_):
     tg = FakeTg()
     await drain(sf, FakeWa(), tg)
     assert tg.edited == [(1, 77, "новый текст", [[["✅ Закрыть", "close:1"]]])]
+
+
+class TakeDuringSendTg(FakeTg):
+    """Пока карточка «летит» в Telegram, другой специалист берёт заявку."""
+
+    def __init__(self, sf, ticket_id, taker_id):
+        super().__init__()
+        self.sf, self.ticket_id, self.taker_id = sf, ticket_id, taker_id
+        self.task = None
+
+    async def _take(self):
+        async with self.sf() as s, s.begin():
+            taker = await s.get(Staff, self.taker_id)
+            return await tickets.take(s, self.ticket_id, taker)
+
+    async def send(self, chat_id, **kw):
+        if self.task is None:
+            self.task = asyncio.create_task(self._take())
+            await asyncio.wait({self.task}, timeout=0.3)  # даём take шанс завершиться
+        return await super().send(chat_id, **kw)
+
+
+async def test_take_during_card_send_sees_the_new_card(sf, clock_):
+    async with sf() as s, s.begin():
+        c = await make_client(s)
+        erlan = await make_staff(s, tg_id=1, name="Ерлан")
+        timur = await make_staff(s, tg_id=2, name="Тимур")
+        t = await make_ticket(s, c)
+        outbox.tg_send(
+            s,
+            1,
+            text="card",
+            buttons=[[("✋ Взять", f"take:{t.id}")]],
+            ticket_id=t.id,
+            card_staff_id=erlan.id,
+            card_seq=t.broadcast_seq,
+        )
+        tid, timur_id = t.id, timur.id
+    tg = TakeDuringSendTg(sf, tid, timur_id)
+    await drain(sf, FakeWa(), tg)
+    assert (await tg.task).ok
+    async with sf() as s:
+        card = await s.scalar(select(TgCard).where(TgCard.staff_id != timur_id))
+        assert card.state == "deleting"

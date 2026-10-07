@@ -111,7 +111,11 @@ async def _deliver(s, item: Outbox, wa, tg) -> None:
         return
     if op == "send":
         if p.get("card_seq") is not None:
-            t = await s.get(Ticket, p["ticket_id"], populate_existing=True)
+            # FOR SHARE до commit: take/рассылка ждут, пока карточка не запишется,
+            # и затем видят её (иначе — карточка-сирота с живой кнопкой).
+            t = await s.get(
+                Ticket, p["ticket_id"], with_for_update={"read": True}, populate_existing=True
+            )
             if t is None or t.status != "new" or t.broadcast_seq != p["card_seq"]:
                 item.status = "skipped"
                 return
