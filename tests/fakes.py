@@ -1,3 +1,6 @@
+from pathlib import Path
+
+
 class FakeWa:
     def __init__(self, fail_chats=None):
         self.sent: list[tuple] = []
@@ -48,3 +51,22 @@ class FakeTg:
         if self.fail_delete:
             raise RuntimeError("message can't be deleted")
         self.deleted.append((chat_id, message_id))
+
+
+class FakeGreen:
+    def __init__(self, items=()):
+        self.items = list(items)  # [(receipt_id, body), ...]
+        self.deleted: list[int] = []
+        self.fail_download = False
+
+    async def receive(self, timeout=20):
+        return self.items[0] if self.items else None
+
+    async def delete(self, receipt_id):
+        self.deleted.append(receipt_id)
+        self.items = [i for i in self.items if i[0] != receipt_id]
+
+    async def download(self, url, dest):
+        if self.fail_download:
+            raise RuntimeError("link expired")
+        Path(dest).write_bytes(b"img")
