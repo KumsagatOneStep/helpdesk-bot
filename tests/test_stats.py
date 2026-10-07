@@ -161,3 +161,14 @@ async def test_export_xlsx(s, clock_):
         10,
         60,
     ]
+
+
+async def test_export_xlsx_neutralizes_formulas_and_control_chars(s, clock_):
+    c = await make_client(s, full_name="=cmd\x0b", location="@x")
+    await make_ticket(s, c, text="=1+1\x01")
+    data = await export.export_xlsx(s, *stats.period_bounds("all", clock_.now))
+    ws = load_workbook(BytesIO(data)).active
+    row = list(ws.iter_rows(min_row=2, values_only=True))[0]
+    assert row[5] == "'=1+1" and row[2] == "'=cmd" and row[3] == "'@x"
+    cell = ws.cell(row=2, column=6)
+    assert cell.data_type != "f"

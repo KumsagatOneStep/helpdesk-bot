@@ -2,6 +2,7 @@ from datetime import datetime
 from io import BytesIO
 
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import distinct_on
 
@@ -25,6 +26,13 @@ HEADERS = [
     "Решение, мин",
 ]
 WIDTHS = [6, 17, 28, 24, 15, 50, 16, 11, 17, 17, 13, 13]
+
+
+def _safe(v: str | None) -> str | None:
+    if v is None:
+        return None
+    v = ILLEGAL_CHARACTERS_RE.sub("", v)
+    return "'" + v if v[:1] in ("=", "+", "-", "@") else v
 
 
 def _naive(dt: datetime | None) -> datetime | None:
@@ -64,10 +72,10 @@ async def export_xlsx(s, start, end) -> bytes:
             [
                 t.id,
                 _naive(t.created_at),
-                c.full_name or c.wa_name,
-                c.location,
+                _safe(c.full_name or c.wa_name),
+                _safe(c.location),
                 "+" + c.phone,
-                first.get(t.id),
+                _safe(first.get(t.id)),
                 names.get(t.assignee_id or t.closed_by_id),
                 STATUS_RU[t.status],
                 _naive(t.first_taken_at),
