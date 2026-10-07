@@ -16,6 +16,12 @@ async def test_receive_returns_none_when_queue_empty():
     assert await c.receive() is None
 
 
+async def test_receive_returns_none_on_empty_body():
+    # Green API отвечает пустым телом 200, когда очередь пуста
+    c = _client(lambda req: httpx.Response(200, text=""))
+    assert await c.receive() is None
+
+
 async def test_receive_and_delete_urls():
     seen = []
 

@@ -19,6 +19,7 @@ async def amain() -> None:
     settings = Settings()
     clock.set_local_tz(settings.tz)
     logging.basicConfig(level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # в URL Green API есть токен
     Path(settings.files_dir).mkdir(parents=True, exist_ok=True)
 
     engine = make_engine(settings.database_url)

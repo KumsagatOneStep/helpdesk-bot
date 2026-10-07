@@ -24,6 +24,8 @@ class GreenApiClient:
             timeout=timeout + 10,
         )
         r.raise_for_status()
+        if not r.content.strip():  # пустая очередь: Green API отвечает пустым телом
+            return None
         data = r.json()
         if not data:
             return None
