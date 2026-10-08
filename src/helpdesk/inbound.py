@@ -1,8 +1,9 @@
 from dataclasses import replace
+from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from helpdesk import texts
+from helpdesk import clock, texts
 from helpdesk.db.models import Client, Message
 from helpdesk.delivery import outbox
 from helpdesk.intake import service as intake
@@ -23,6 +24,23 @@ def _save(s, client: Client, msg: IncomingMessage, file_path: str | None, *, int
     )
     s.add(m)
     return m
+
+
+# флуд с одного номера: лишние сообщения сохраняются в заявку, но не рассылаются в Telegram
+MAX_PER_MINUTE = 20
+
+
+async def _flooding(s, client: Client) -> bool:
+    recent = await s.scalar(
+        select(func.count())
+        .select_from(Message)
+        .where(
+            Message.client_id == client.id,
+            Message.direction == "in",
+            Message.created_at > clock.utcnow() - timedelta(minutes=1),
+        )
+    )
+    return recent >= MAX_PER_MINUTE
 
 
 def _no_nul(v: str | None) -> str | None:
@@ -58,8 +76,9 @@ async def handle_incoming(s, msg: IncomingMessage, file_path: str | None) -> Non
             await tickets.on_client_message(s, client, None)
         await s.flush()
         return
+    flooding = await _flooding(s, client)
     m = _save(s, client, msg, file_path, intake_answer=False)
     await s.flush()
-    if msg.kind == "other":
+    if msg.kind == "other" and not flooding:
         outbox.wa_text(s, client.wa_chat_id, texts.t(client.lang, "unsupported"))
-    await tickets.on_client_message(s, client, m)
+    await tickets.on_client_message(s, client, m, notify=not flooding)

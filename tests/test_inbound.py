@@ -6,7 +6,7 @@ from helpdesk.db.models import Client, Message, Ticket
 from helpdesk.inbound import handle_incoming
 from helpdesk.intake.service import parse_lang
 from helpdesk.whatsapp.parse import IncomingMessage
-from tests.factories import make_client, make_staff, payloads
+from tests.factories import make_client, make_staff, make_ticket, payloads
 
 CHAT = "77011234567@c.us"
 
@@ -159,3 +159,40 @@ async def test_nul_characters_are_stripped(s, clock_):
     await handle_incoming(s, msg, "/f/a.pdf")
     m = await s.scalar(select(Message))
     assert (m.text, m.file_name) == ("принтер", "a.pdf")
+
+
+async def test_intake_reprompts_pause_after_three_rejections(s, clock_):
+    # автоответчик на номере не должен устроить бесконечный пинг-понг анкетой
+    await _feed(s, "Привет", "x", "x", "x", "x", "x")
+    assert await _wa_texts(s) == [texts.CHOOSE_LANG] * 4
+    clock_.advance(minutes=29)
+    await handle_incoming(s, incoming("x", mid="L1"), None)
+    assert len(await _wa_texts(s)) == 4
+    clock_.advance(minutes=2)
+    await handle_incoming(s, incoming("x", mid="L2"), None)
+    assert await _wa_texts(s) == [texts.CHOOSE_LANG] * 5
+
+
+async def test_valid_intake_answer_accepted_during_pause(s, clock_):
+    await _feed(s, "Привет", "x", "x", "x", "x")
+    await handle_incoming(s, incoming("1", mid="OK"), None)
+    assert (await _wa_texts(s))[-1] == texts.t("ru", "ask_name")
+    assert (await s.scalar(select(Client))).intake_step == "name"
+
+
+async def test_flood_from_one_number_is_saved_but_not_forwarded(s, clock_):
+    c = await make_client(s)
+    st = await make_staff(s, tg_id=7, name="Ерлан")
+    t = await make_ticket(s, c, status="in_progress", assignee=st)
+    clock_.advance(seconds=61)  # сообщение из make_ticket — не часть флуда
+    for i in range(25):
+        await handle_incoming(s, incoming(f"сообщение {i}", mid=f"F{i}"), None)
+    forwarded = [p for p in await payloads(s, "tg") if p["chat_id"] == 7]
+    assert len(forwarded) == 20
+    in_ticket = await s.scalar(
+        select(func.count()).select_from(Message).where(Message.ticket_id == t.id)
+    )
+    assert in_ticket == 25 + 1  # + сообщение из make_ticket
+    clock_.advance(seconds=61)
+    await handle_incoming(s, incoming("снова", mid="F99"), None)
+    assert len([p for p in await payloads(s, "tg") if p["chat_id"] == 7]) == 21

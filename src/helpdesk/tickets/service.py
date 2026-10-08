@@ -32,7 +32,9 @@ async def ticket_messages(s, ticket_id: int) -> list[Message]:
     return list((await s.scalars(q)).all())
 
 
-async def on_client_message(s, client: Client, message: Message | None) -> Ticket:
+async def on_client_message(
+    s, client: Client, message: Message | None, *, notify: bool = True
+) -> Ticket:
     # блокировка: take/close/возврат не проскочат между чтением статуса и разводкой сообщения
     t = await open_ticket(s, client.id, lock=True)
     if t is None:
@@ -60,6 +62,8 @@ async def on_client_message(s, client: Client, message: Message | None) -> Ticke
     if message is not None:
         message.ticket_id = t.id
         await s.flush()
+    if not notify:  # флуд: сообщение уже в заявке, специалистам не дублируем
+        return t
     if t.status == "in_progress" and message is not None:
         staff = await s.get(Staff, t.assignee_id)
         _forward(s, staff, t, client, message)

@@ -25,6 +25,8 @@ class Client(Base):
     location: Mapped[str | None] = mapped_column(String(200))
     lang: Mapped[str] = mapped_column(String(2), default="ru")
     intake_step: Mapped[str] = mapped_column(String(16), default="lang")
+    intake_rejects: Mapped[int] = mapped_column(default=0, server_default="0")
+    intake_muted_until: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(default=_now)
 
 
