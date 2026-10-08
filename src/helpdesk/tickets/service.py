@@ -258,6 +258,11 @@ async def resolve_target(s, staff: Staff, reply_to: int | None) -> tuple[Ticket 
             if _is_mine(t, staff):
                 return t, ""
             return None, f"Заявка #{link.ticket_id} закрыта или не у вас — сообщение не отправлено."
+        # reply на сообщение без привязки не отправляем в активную: можно ответить не тому клиенту
+        return None, (
+            "Не понятно, к какой заявке относится ответ — сообщение не отправлено. "
+            "Ответьте на карточку заявки или отправьте без reply в активную."
+        )
     if staff.active_ticket_id:
         t = await s.get(Ticket, staff.active_ticket_id)
         if _is_mine(t, staff):

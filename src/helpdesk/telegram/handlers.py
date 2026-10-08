@@ -267,8 +267,10 @@ async def cb_chat(cq: CallbackQuery, s, bot: Bot):
         await cq.answer("Заявка не найдена", show_alert=True)
         return
     await cq.answer()
+    tid = _arg_id(cq)
     for chunk in conv.chunks:
-        await cq.message.answer(chunk)
+        sent = await cq.message.answer(chunk)
+        await tickets.link(s, cq.message.chat.id, sent.message_id, tid)
     sender = AiogramSender(bot)
     for path, kind, caption in conv.files:
         if os.path.exists(path):
@@ -404,6 +406,7 @@ async def _reply_to_client(message: Message, s, staff: Staff, bot: Bot, settings
     await tickets.send_staff_reply(
         s, staff, t, content.kind, content.text, content.file_path, content.file_name
     )
+    await tickets.link(s, staff.tg_chat_id, message.message_id, t.id)
     c = await s.get(Client, t.client_id)
     await message.answer(f"→ #{t.id} {_cname(c)} ✓")
 

@@ -155,7 +155,17 @@ async def test_resolve_prefers_reply_link(s, clock_):
 async def test_plain_message_goes_to_active(s, clock_):
     erlan, t1, t2 = await _two_in_work(s)
     assert await tickets.resolve_target(s, erlan, None) == (t2, "")
-    assert await tickets.resolve_target(s, erlan, 99999) == (t2, "")  # reply на не-заявку
+
+
+async def test_reply_to_unlinked_message_is_refused_not_sent_to_active(s, clock_):
+    # reply на сообщение без привязки (переписка, /my, поиск) не уходит молча в активную заявку
+    erlan, t1, t2 = await _two_in_work(s)
+    t, err = await tickets.resolve_target(s, erlan, 99999)
+    assert t is None
+    assert err == (
+        "Не понятно, к какой заявке относится ответ — сообщение не отправлено. "
+        "Ответьте на карточку заявки или отправьте без reply в активную."
+    )
 
 
 async def test_reply_to_closed_ticket_is_refused_not_redirected(s, clock_):

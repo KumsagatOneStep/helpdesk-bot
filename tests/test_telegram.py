@@ -5,10 +5,14 @@ import pytest
 from aiogram import Dispatcher
 from aiogram.types import InlineKeyboardMarkup
 
+from helpdesk.db.models import Message as DbMessage
+from helpdesk.db.models import TgLink
 from helpdesk.telegram import handlers
 from helpdesk.telegram.gateway import markup
 from helpdesk.telegram.media import MAX_BYTES, FileTooBig, extract_content
 from helpdesk.telegram.parsing import parse_client_args
+from helpdesk.tickets import service as tickets
+from tests.factories import make_client, make_staff, make_ticket
 
 
 def test_parse_client_args():
@@ -125,3 +129,59 @@ async def test_router_only_handles_private_chats(chat_type, ok):
     )
     passed, _ = await handlers.router.callback_query._handler.check(cq)
     assert passed is ok
+
+
+class _Sent:
+    _next = 500
+
+    def __init__(self):
+        _Sent._next += 1
+        self.message_id = _Sent._next
+
+
+class FakeChatMessage:
+    def __init__(self, chat_id, **kw):
+        self.chat = SimpleNamespace(id=chat_id)
+        self.answers = []
+        self.message_id = kw.pop("message_id", 900)
+        self.reply_to_message = kw.pop("reply_to_message", None)
+        self.__dict__.update(_msg(**kw).__dict__)
+
+    async def answer(self, text, **kw):
+        self.answers.append(text)
+        return _Sent()
+
+
+async def test_conversation_chunks_are_linked_to_ticket(s, clock_):
+    c = await make_client(s)
+    st = await make_staff(s, tg_id=5, name="Ерлан")
+    t = await make_ticket(s, c, status="in_progress", assignee=st)
+    s.add(DbMessage(client_id=c.id, ticket_id=t.id, direction="in", kind="text", text="Помогите"))
+    await s.flush()
+    msg = FakeChatMessage(5)
+
+    async def _ans(*a, **kw):
+        return None
+
+    cq = SimpleNamespace(data=f"chat:{t.id}", message=msg, answer=_ans)
+    await handlers.cb_chat(cq, s, bot=None)
+    assert msg.answers
+    links = (await s.execute(TgLink.__table__.select())).all()
+    assert links and all(r.ticket_id == t.id for r in links)
+    assert (await tickets.resolve_target(s, st, _Sent._next))[0] == t
+
+
+async def test_staff_reply_is_linked_so_replying_to_it_hits_same_ticket(s, clock_, tmp_path):
+    c1 = await make_client(s)
+    c2 = await make_client(s, phone="77017654321", full_name="Бауыржан")
+    st = await make_staff(s, tg_id=6, name="Ерлан")
+    t1 = await make_ticket(s, c1, status="in_progress", assignee=st)
+    t2 = await make_ticket(s, c2, status="in_progress", assignee=st)
+    st.active_ticket_id = t1.id
+    await s.flush()
+    msg = FakeChatMessage(6, text="Иду", message_id=4242)
+    settings = SimpleNamespace(files_dir=str(tmp_path))
+    await handlers._reply_to_client(msg, s, st, FakeBot(), settings)
+    st.active_ticket_id = t2.id
+    await s.flush()
+    assert (await tickets.resolve_target(s, st, 4242))[0] == t1
