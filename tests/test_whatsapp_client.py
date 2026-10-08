@@ -115,3 +115,29 @@ async def test_download_error_does_not_leak_url(tmp_path):
     with pytest.raises(GreenApiError) as ei:
         await c.download(f"https://cdn.test/{SECRET}/x.jpg", tmp_path / "x.jpg")
     assert SECRET not in _full_trace(ei.value)
+
+
+async def test_download_over_limit_is_aborted_and_partial_file_removed(tmp_path):
+    c = _client(lambda req: httpx.Response(200, content=b"x" * 2000))
+    dest = tmp_path / "big.mp4"
+    with pytest.raises(GreenApiError):
+        await c.download("https://cdn.test/big", dest, max_bytes=1000)
+    assert not dest.exists()
+
+
+async def test_download_rejected_by_content_length_before_writing(tmp_path):
+    c = _client(
+        lambda req: httpx.Response(200, headers={"Content-Length": "5000"}, content=b"x" * 5000)
+    )
+    dest = tmp_path / "big.mp4"
+    with pytest.raises(GreenApiError):
+        await c.download("https://cdn.test/big", dest, max_bytes=1000)
+    assert not dest.exists()
+
+
+async def test_download_failure_removes_partial_file(tmp_path):
+    c = _client(lambda req: httpx.Response(500))
+    dest = tmp_path / "x.jpg"
+    with pytest.raises(GreenApiError):
+        await c.download("https://cdn.test/x", dest)
+    assert not dest.exists()

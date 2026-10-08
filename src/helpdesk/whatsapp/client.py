@@ -3,6 +3,9 @@ from pathlib import Path
 
 import httpx
 
+# Telegram-бот не отправит файл больше 50 МБ, качать больше нет смысла
+MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
 
 class GreenApiError(Exception):
     """Ошибка Green API без URL: в пути запроса лежит токен, он не должен попасть в логи/БД."""
@@ -93,12 +96,22 @@ class GreenApiClient:
         _check(r, "sendFileByUpload")
         return r.json()["idMessage"]
 
-    async def download(self, url: str, dest: Path) -> None:
-        async with _guard("download"), self._http.stream("GET", url) as r:
-            _check(r, "download")
-            with open(dest, "wb") as f:
-                async for chunk in r.aiter_bytes():
-                    f.write(chunk)
+    async def download(self, url: str, dest: Path, max_bytes: int = MAX_DOWNLOAD_BYTES) -> None:
+        try:
+            async with _guard("download"), self._http.stream("GET", url) as r:
+                _check(r, "download")
+                if int(r.headers.get("Content-Length") or 0) > max_bytes:
+                    raise GreenApiError("download", detail="file too large")
+                size = 0
+                with open(dest, "wb") as f:
+                    async for chunk in r.aiter_bytes():
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise GreenApiError("download", detail="file too large")
+                        f.write(chunk)
+        except BaseException:
+            Path(dest).unlink(missing_ok=True)  # недокачанный файл не оставляем
+            raise
 
     async def aclose(self) -> None:
         await self._http.aclose()
