@@ -1,9 +1,10 @@
 import json
+import traceback
 
 import httpx
 import pytest
 
-from helpdesk.whatsapp.client import GreenApiClient
+from helpdesk.whatsapp.client import GreenApiClient, GreenApiError
 
 
 def _client(handler):
@@ -72,5 +73,45 @@ async def test_download_writes_file(tmp_path):
 
 async def test_http_error_raises():
     c = _client(lambda req: httpx.Response(500))
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(GreenApiError):
         await c.send_text("1@c.us", "x")
+
+
+SECRET = "s3cr3tT0kenValue0123456789"
+
+
+def _secret_client(handler):
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return GreenApiClient("https://api.test", "https://media.test", "1101", SECRET, http=http)
+
+
+def _full_trace(e: BaseException) -> str:
+    return "".join(traceback.format_exception(e))
+
+
+@pytest.mark.parametrize("status", [401, 429, 466, 500])
+async def test_status_error_does_not_leak_token(status):
+    c = _secret_client(lambda req: httpx.Response(status))
+    with pytest.raises(GreenApiError) as ei:
+        await c.receive()
+    assert ei.value.status == status
+    assert SECRET not in str(ei.value)
+    assert SECRET not in _full_trace(ei.value)
+
+
+async def test_transport_error_does_not_leak_token():
+    def h(req):
+        raise httpx.ConnectError(f"cannot connect to {req.url}", request=req)
+
+    c = _secret_client(h)
+    with pytest.raises(GreenApiError) as ei:
+        await c.send_text("1@c.us", "x")
+    assert SECRET not in str(ei.value)
+    assert SECRET not in _full_trace(ei.value)
+
+
+async def test_download_error_does_not_leak_url(tmp_path):
+    c = _secret_client(lambda req: httpx.Response(404))
+    with pytest.raises(GreenApiError) as ei:
+        await c.download(f"https://cdn.test/{SECRET}/x.jpg", tmp_path / "x.jpg")
+    assert SECRET not in _full_trace(ei.value)
