@@ -185,3 +185,49 @@ async def test_staff_reply_is_linked_so_replying_to_it_hits_same_ticket(s, clock
     st.active_ticket_id = t2.id
     await s.flush()
     assert (await tickets.resolve_target(s, st, 4242))[0] == t1
+
+
+def _cq(data: str):
+    from aiogram.types import CallbackQuery
+
+    return CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "from": {"id": 5, "is_bot": False, "first_name": "Ерлан"},
+            "chat_instance": "x",
+            "data": data,
+            "message": _tg_message("private").model_dump(by_alias=True),
+        }
+    )
+
+
+async def _matched_handler(data: str) -> str:
+    admin = SimpleNamespace(status="active", is_admin=True)
+    for h in handlers.router.callback_query.handlers:
+        passed, _ = await h.check(_cq(data), staff=admin)
+        if passed:
+            return h.callback.__name__
+    return ""
+
+
+@pytest.mark.parametrize(
+    "data",
+    ["take:abc", "take:", "close:1:2", "chat:99999999999999999999", "approve:-1", "goto:1e3"],
+)
+async def test_malformed_callback_data_goes_to_fallback(data):
+    assert await _matched_handler(data) == "cb_fallback"
+
+
+@pytest.mark.parametrize(
+    "data,name",
+    [("take:12", "cb_take"), ("chat:7", "cb_chat"), ("approve:3", "cb_approve")],
+)
+async def test_wellformed_callback_data_reaches_handler(data, name):
+    assert await _matched_handler(data) == name
+
+
+def test_engine_hides_sql_parameters_in_errors():
+    from helpdesk.db.session import make_engine
+
+    eng = make_engine("postgresql+asyncpg://u:p@localhost:1/x")
+    assert eng.sync_engine.hide_parameters is True

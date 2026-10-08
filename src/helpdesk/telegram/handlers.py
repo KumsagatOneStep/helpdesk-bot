@@ -68,6 +68,10 @@ class IsAdmin(Filter):
         return staff is not None and staff.status == "active" and staff.is_admin
 
 
+# id из callback_data: только цифры и не больше int4 — подделка уходит в cb_fallback
+_ID_DATA = r"^{}:\d{{1,9}}$"
+
+
 def _arg_id(cq: CallbackQuery) -> int:
     return int(cq.data.split(":", 1)[1])
 
@@ -148,7 +152,7 @@ async def cmd_my(message: Message, s, staff: Staff):
     await message.answer("Ваши заявки в работе:\n" + "\n".join(lines), reply_markup=markup(buttons))
 
 
-@router.callback_query(F.data.startswith("goto:"), IsActive())
+@router.callback_query(F.data.regexp(_ID_DATA.format("goto")), IsActive())
 async def cb_goto(cq: CallbackQuery, s, staff: Staff):
     t = await tickets.set_active(s, staff, _arg_id(cq))
     if t is None:
@@ -159,7 +163,7 @@ async def cb_goto(cq: CallbackQuery, s, staff: Staff):
     await cq.answer(f"Активная: #{t.id}")
 
 
-@router.callback_query(F.data.startswith("take:"), IsActive())
+@router.callback_query(F.data.regexp(_ID_DATA.format("take")), IsActive())
 async def cb_take(cq: CallbackQuery, s, staff: Staff):
     r = await tickets.take(s, _arg_id(cq), staff)
     if r.ok:
@@ -176,7 +180,7 @@ async def _drop_buttons(cq: CallbackQuery) -> None:
         pass
 
 
-@router.callback_query(F.data.startswith("close:"), IsActive())
+@router.callback_query(F.data.regexp(_ID_DATA.format("close")), IsActive())
 async def cb_close(cq: CallbackQuery, s, staff: Staff):
     tid = _arg_id(cq)
     if not await tickets.close_ticket(s, tid, staff):
@@ -187,7 +191,7 @@ async def cb_close(cq: CallbackQuery, s, staff: Staff):
     await cq.answer()
 
 
-@router.callback_query(F.data.startswith("ret:"), IsActive())
+@router.callback_query(F.data.regexp(_ID_DATA.format("ret")), IsActive())
 async def cb_return(cq: CallbackQuery, s, staff: Staff):
     tid = _arg_id(cq)
     if not await tickets.return_ticket(s, tid, staff):
@@ -260,7 +264,7 @@ async def _find(message: Message, s, staff: Staff, q: str) -> None:
     await message.answer("\n".join(lines) + "\n\nПодробнее: /find <номер>")
 
 
-@router.callback_query(F.data.startswith("chat:"), IsActive())
+@router.callback_query(F.data.regexp(_ID_DATA.format("chat")), IsActive())
 async def cb_chat(cq: CallbackQuery, s, bot: Bot):
     conv = await stats.conversation(s, _arg_id(cq))
     if conv is None:
@@ -349,7 +353,7 @@ async def cmd_staff(message: Message, s, staff: Staff):
         )
 
 
-@router.callback_query(F.data.startswith("approve:"), IsAdmin())
+@router.callback_query(F.data.regexp(_ID_DATA.format("approve")), IsAdmin())
 async def cb_approve(cq: CallbackQuery, s, staff: Staff):
     st = await staff_svc.approve(s, staff, _arg_id(cq))
     if st is None:
@@ -359,7 +363,7 @@ async def cb_approve(cq: CallbackQuery, s, staff: Staff):
     await cq.answer()
 
 
-@router.callback_query(F.data.startswith("reject:"), IsAdmin())
+@router.callback_query(F.data.regexp(_ID_DATA.format("reject")), IsAdmin())
 async def cb_reject(cq: CallbackQuery, s, staff: Staff):
     st = await staff_svc.reject(s, staff, _arg_id(cq))
     if st is None:
@@ -376,7 +380,7 @@ _STAFF_ACTIONS = {
 }
 
 
-@router.callback_query(F.data.regexp(r"^stf_(dis|en|adm):\d+$"), IsAdmin())
+@router.callback_query(F.data.regexp(r"^stf_(dis|en|adm):\d{1,9}$"), IsAdmin())
 async def cb_staff_action(cq: CallbackQuery, s, staff: Staff):
     action, sid = cq.data.split(":")
     if not await _STAFF_ACTIONS[action](s, staff, int(sid)):

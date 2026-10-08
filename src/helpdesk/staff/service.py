@@ -28,12 +28,17 @@ async def register(s, *, tg_user_id, chat_id, name, username, admin_ids: set[int
     s.add(st)
     await s.flush()
     if not is_env_admin:
-        who = f"{name} (@{username})" if username else name
+        who = (
+            f"{name} (@{username}, Telegram id {tg_user_id})"
+            if username
+            else (f"{name} (Telegram id {tg_user_id})")
+        )
         for a in await queries.active_admins(s):
             outbox.tg_send(
                 s,
                 a.tg_chat_id,
-                text=f"🙋 {who} просит доступ к helpdesk-боту",
+                text=f"🙋 {who} просит доступ к helpdesk-боту.\n"
+                "Имя в профиле может быть чужим — сверьте id с коллегой лично.",
                 buttons=[
                     [("✅ Одобрить", f"approve:{st.id}"), ("❌ Отклонить", f"reject:{st.id}")]
                 ],

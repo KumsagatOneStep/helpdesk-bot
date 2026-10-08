@@ -18,7 +18,10 @@ async def test_newcomer_is_pending_and_admins_are_asked(s, clock_):
     assert (st.status, st.is_admin) == ("pending", False)
     p = await payloads(s, "tg")
     assert p[0]["chat_id"] == 9
-    assert p[0]["text"] == "🙋 Ерлан (@erlan) просит доступ к helpdesk-боту"
+    assert p[0]["text"] == (
+        "🙋 Ерлан (@erlan, Telegram id 5) просит доступ к helpdesk-боту.\n"
+        "Имя в профиле может быть чужим — сверьте id с коллегой лично."
+    )
     assert p[0]["buttons"] == [
         [["✅ Одобрить", f"approve:{st.id}"], ["❌ Отклонить", f"reject:{st.id}"]]
     ]
