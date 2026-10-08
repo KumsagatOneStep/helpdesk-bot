@@ -19,7 +19,12 @@
    - `ADMIN_TG_IDS` — ваш Telegram ID (узнать у @userinfobot), через запятую;
    - `GREEN_API_ID_INSTANCE`, `GREEN_API_TOKEN`, `GREEN_API_URL`, `GREEN_API_MEDIA_URL` — из личного кабинета Green API (apiUrl и mediaUrl инстанса);
    - `POSTGRES_PASSWORD` — длинный пароль только из латинских букв и цифр (он подставляется в `DATABASE_URL`, спецсимволы вроде `@`, `:`, `/` сломают адрес).
-3. `mkdir -p data backups && sudo chown 999:999 backups` (сервис бэкапа пишет от uid 999).
+3. Папки и права (бот пишет от uid 10001, сервис бэкапа — от uid 999; в `.env` токены):
+   ```bash
+   mkdir -p data backups
+   sudo chown 10001:10001 data && sudo chown 999:999 backups
+   sudo chmod 700 data backups && chmod 600 .env
+   ```
 4. Green API: в кабинете отсканировать QR телефоном рабочего номера. В настройках инстанса включить
    «Получать уведомления о входящих сообщениях и файлах», поле Webhook URL оставить **пустым**.
 5. `docker compose up -d --build`
@@ -28,7 +33,7 @@
 
 ## Обслуживание
 
-- Логи: `docker compose logs -f bot`
+- Логи: `docker compose logs -f bot` (ротация: 3 файла по 10 МБ на сервис)
 - Обновление: `git pull && docker compose up -d --build` (миграции применяются при старте)
 - Бэкапы базы: `./backups/` (ежедневно, 14 дней). Вложения лежат в `./data/files` —
   включите снапшоты диска у провайдера VPS или копируйте папку `data/` отдельно.
@@ -41,6 +46,8 @@ uv sync
 make test-db   # PostgreSQL для тестов на localhost:5433
 make check     # ruff + pytest
 ```
+
+Тесты на VPS не запускать: тестовая база с известным паролем (хотя `make test-db` и слушает только 127.0.0.1).
 
 ## Чек-лист ручной приёмки
 

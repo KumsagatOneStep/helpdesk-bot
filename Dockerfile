@@ -7,4 +7,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY . .
 RUN uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH"
+# не root: при RCE через зависимость — без root в контейнере и на bind-mount ./data
+RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin app
+USER app
 CMD ["sh", "-c", "alembic upgrade head && python -m helpdesk.main"]

@@ -1,6 +1,13 @@
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
     image: postgres:16
+    logging: *logging
     restart: unless-stopped
     environment:
       POSTGRES_USER: helpdesk
@@ -15,6 +22,7 @@ services:
 
   bot:
     build: .
+    logging: *logging
     restart: unless-stopped
     env_file: .env
     environment:
@@ -29,6 +37,7 @@ services:
 
   backup:
     image: prodrigestivill/postgres-backup-local:16
+    logging: *logging
     restart: unless-stopped
     environment:
       POSTGRES_HOST: db

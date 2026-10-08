@@ -4,7 +4,7 @@ TEST_DB_URL ?= postgresql+asyncpg://helpdesk:helpdesk@localhost:5433/helpdesk_te
 
 test-db:
 	docker start helpdesk-test-db 2>/dev/null || docker run -d --name helpdesk-test-db \
-	  -p 5433:5432 -e POSTGRES_USER=helpdesk -e POSTGRES_PASSWORD=helpdesk \
+	  -p 127.0.0.1:5433:5432 -e POSTGRES_USER=helpdesk -e POSTGRES_PASSWORD=helpdesk \
 	  -e POSTGRES_DB=helpdesk_test postgres:16
 
 test:
