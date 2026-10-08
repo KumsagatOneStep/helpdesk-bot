@@ -18,6 +18,14 @@ async def poll_once(sf, green, files_dir: str, failures: dict[int, int], retry_s
     receipt_id, body = got
     try:
         msg = parse_notification(body)
+        if msg is None:  # без номера и текста: только тип и домен chatId
+            chat = (body.get("senderData") or {}).get("chatId") or ""
+            log.info(
+                "wa notification ignored",
+                type=body.get("typeWebhook"),
+                chat_domain=chat.rpartition("@")[2] if isinstance(chat, str) else "?",
+                message_type=(body.get("messageData") or {}).get("typeMessage"),
+            )
         if msg is not None:
             file_path = None
             if msg.download_url:
