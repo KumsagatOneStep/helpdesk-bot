@@ -235,6 +235,12 @@ async def cancel_create(cq: CallbackQuery, state: FSMContext, staff: Staff):
     await cq.answer()
 
 
+@router.message(StateFilter(TaskForm), IsActive(), NOT_CANCEL)
+async def stray_input(message: Message):
+    """Лишний ввод посреди диалога не должен уйти клиенту как ответ."""
+    await message.answer("Используйте кнопки выше или «✖️ Отмена».")
+
+
 @router.callback_query(F.data.startswith("tkn_"))
 async def stale_dialog(cq: CallbackQuery):
     await cq.answer("Диалог уже завершён", show_alert=True)

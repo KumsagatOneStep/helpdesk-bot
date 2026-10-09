@@ -5,6 +5,7 @@ import pytest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import Message
 from sqlalchemy import select
 
 from helpdesk.db.models import Task
@@ -117,3 +118,34 @@ async def test_stale_dialog_button():
     cq = Cq("tkn_due:today")
     await task_handlers.stale_dialog(cq)
     assert cq.alerts == ["Диалог уже завершён"]
+
+
+def _message(**kw) -> Message:
+    return Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "E"},
+            **kw,
+        }
+    )
+
+
+async def _matched(msg: Message, raw_state: str, staff) -> bool:
+    for h in task_handlers.router.message.handlers:
+        ok, _ = await h.check(msg, staff=staff, raw_state=raw_state)
+        if ok:
+            return True
+    return False
+
+
+@pytest.mark.parametrize(
+    "st", [TaskForm.kind, TaskForm.requester, TaskForm.due, TaskForm.due_custom, TaskForm.confirm]
+)
+async def test_stray_input_never_reaches_client_reply(st):
+    staff = SimpleNamespace(status="active", is_admin=False)
+    assert await _matched(_message(text="опечатка"), st.state, staff)
+    photo = {"file_id": "f", "file_unique_id": "u", "width": 1, "height": 1}
+    assert await _matched(_message(photo=[photo]), st.state, staff)
+    assert not await _matched(_message(text=menu.CANCEL), st.state, staff)
