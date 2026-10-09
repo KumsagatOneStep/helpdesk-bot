@@ -1,9 +1,10 @@
 from sqlalchemy import select
 
 from helpdesk.db import queries
-from helpdesk.db.models import Staff, TgCard, Ticket
+from helpdesk.db.models import Staff, Task, TgCard, Ticket
 from helpdesk.delivery import outbox
 from helpdesk.delivery.outbox import Buttons
+from helpdesk.tasks import service as tasks
 from helpdesk.tickets import service as tickets
 
 STATUS_RU = {"pending": "ждёт одобрения", "active": "активен", "disabled": "отключён"}
@@ -79,6 +80,9 @@ async def disable(s, admin: Staff, staff_id: int) -> bool:
     q = select(Ticket.id).where(Ticket.status == "in_progress", Ticket.assignee_id == st.id)
     for tid in (await s.scalars(q)).all():
         await tickets.return_ticket(s, tid, admin)
+    tq = select(Task.id).where(Task.status == "in_progress", Task.assignee_id == st.id)
+    for task_id in (await s.scalars(tq)).all():
+        await tasks.release(s, task_id, st)
     return True
 
 
@@ -98,6 +102,14 @@ async def toggle_admin(s, admin: Staff, staff_id: int) -> bool:
     return True
 
 
+async def toggle_role(s, admin: Staff, staff_id: int) -> bool:
+    st = await _target(s, admin, staff_id)
+    if st is None or st.status != "active":
+        return False
+    st.role = "helpdesk" if st.role == "coordinator" else "coordinator"
+    return True
+
+
 async def set_shift(s, staff: Staff, on: bool) -> int | None:
     if staff.on_shift == on:
         return None
@@ -108,7 +120,9 @@ async def set_shift(s, staff: Staff, on: bool) -> int | None:
         for card in (await s.scalars(q)).all():
             outbox.tg_delete_card(s, card, f"#{card.ticket_id} — вы не на смене")
         return 0
-    return await tickets.deliver_queue_to(s, staff)
+    n = await tickets.deliver_queue_to(s, staff)
+    await tasks.deliver_queue_to(s, staff)
+    return n
 
 
 async def list_staff(s) -> list[Staff]:
@@ -118,14 +132,24 @@ async def list_staff(s) -> list[Staff]:
 def staff_line(st: Staff) -> str:
     crown = "👑 " if st.is_admin else ""
     nick = f" (@{st.username})" if st.username else ""
+    role = " · 🧭 координатор" if st.role == "coordinator" else ""
     shift = ", на смене" if st.status == "active" and st.on_shift else ""
-    return f"{crown}{st.name}{nick} — {STATUS_RU[st.status]}{shift}"
+    return f"{crown}{st.name}{nick}{role} — {STATUS_RU[st.status]}{shift}"
+
+
+def _role_button(st: Staff) -> tuple[str, str]:
+    if st.role == "coordinator":
+        return ("Сделать helpdesk", f"stf_role:{st.id}")
+    return ("🧭 Сделать координатором", f"stf_role:{st.id}")
 
 
 def staff_buttons(st: Staff, me: Staff) -> Buttons | None:
     if st.id == me.id:
-        return None
+        return [[_role_button(st)]]
     if st.status == "active":
         adm = "Снять админа" if st.is_admin else "👑 Сделать админом"
-        return [[("⛔ Отключить", f"stf_dis:{st.id}"), (adm, f"stf_adm:{st.id}")]]
+        return [
+            [("⛔ Отключить", f"stf_dis:{st.id}"), (adm, f"stf_adm:{st.id}")],
+            [_role_button(st)],
+        ]
     return [[("✅ Включить", f"stf_en:{st.id}")]]

@@ -1,5 +1,12 @@
 from helpdesk.staff import service as staff_svc
-from tests.factories import clear_outbox, make_client, make_staff, make_ticket, payloads
+from tests.factories import (
+    clear_outbox,
+    make_client,
+    make_staff,
+    make_task,
+    make_ticket,
+    payloads,
+)
 
 
 async def test_admin_from_env_is_active(s, clock_):
@@ -107,12 +114,54 @@ async def test_shift_on_delivers_queue(s, clock_):
 async def test_staff_line_and_buttons(s, clock_):
     admin = await make_staff(s, tg_id=9, name="Админ", is_admin=True)
     u = await make_staff(s, tg_id=1, name="Тимур")
+    c = await make_staff(s, tg_id=3, name="Айжан", role="coordinator")
     assert staff_svc.staff_line(u) == "Тимур — активен, на смене"
     assert staff_svc.staff_line(admin) == "👑 Админ — активен, на смене"
+    assert staff_svc.staff_line(c) == "Айжан · 🧭 координатор — активен, на смене"
     assert staff_svc.staff_buttons(u, admin) == [
-        [("⛔ Отключить", f"stf_dis:{u.id}"), ("👑 Сделать админом", f"stf_adm:{u.id}")]
+        [("⛔ Отключить", f"stf_dis:{u.id}"), ("👑 Сделать админом", f"stf_adm:{u.id}")],
+        [("🧭 Сделать координатором", f"stf_role:{u.id}")],
     ]
-    assert staff_svc.staff_buttons(admin, admin) is None
+    assert staff_svc.staff_buttons(c, admin)[1] == [("Сделать helpdesk", f"stf_role:{c.id}")]
+    assert staff_svc.staff_buttons(admin, admin) == [
+        [("🧭 Сделать координатором", f"stf_role:{admin.id}")]
+    ]
+
+
+async def test_toggle_role(s, clock_):
+    admin = await make_staff(s, tg_id=9, name="Админ", is_admin=True)
+    u = await make_staff(s, tg_id=1, name="Тимур")
+    off = await make_staff(s, tg_id=2, name="Ушёл", status="disabled")
+    assert await staff_svc.toggle_role(s, admin, u.id) and u.role == "coordinator"
+    assert await staff_svc.toggle_role(s, admin, u.id) and u.role == "helpdesk"
+    assert await staff_svc.toggle_role(s, admin, admin.id) and admin.role == "coordinator"
+    assert not await staff_svc.toggle_role(s, admin, off.id)
+    assert not await staff_svc.toggle_role(s, u, admin.id)  # не админ
+
+
+async def test_shift_on_delivers_task_queue_too(s, clock_):
+    erlan = await make_staff(s, tg_id=1, name="Ерлан")
+    tima = await make_staff(s, tg_id=2, name="Тимур", on_shift=False)
+    await make_task(s, erlan, status="queued", assignee=None)
+    assert await staff_svc.set_shift(s, tima, True) == 0  # заявок в очереди нет
+    ps = await payloads(s, "tg")
+    assert [p["chat_id"] for p in ps if p.get("task_card_staff_id")] == [2]
+
+
+async def test_disable_releases_tasks_to_queue(s, clock_):
+    from helpdesk.db.models import Task
+
+    admin = await make_staff(s, tg_id=9, name="Админ", is_admin=True)
+    tima = await make_staff(s, tg_id=2, name="Тимур")
+    await make_staff(s, tg_id=1, name="Ерлан")
+    t = await make_task(s, tima)
+    await clear_outbox(s)
+    assert await staff_svc.disable(s, admin, tima.id)
+    await s.refresh(t)
+    assert (t.status, t.assignee_id) == ("queued", None)
+    cards = [p for p in await payloads(s, "tg") if p.get("task_card_staff_id")]
+    assert sorted(p["chat_id"] for p in cards) == [1, 9]
+    assert (await s.get(Task, t.id)).status == "queued"
 
 
 async def test_shift_off_removes_own_queue_cards(s, clock_):

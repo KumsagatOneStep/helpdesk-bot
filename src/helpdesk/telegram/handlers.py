@@ -377,10 +377,11 @@ _STAFF_ACTIONS = {
     "stf_dis": staff_svc.disable,
     "stf_en": staff_svc.enable,
     "stf_adm": staff_svc.toggle_admin,
+    "stf_role": staff_svc.toggle_role,
 }
 
 
-@router.callback_query(F.data.regexp(r"^stf_(dis|en|adm):\d{1,9}$"), IsAdmin())
+@router.callback_query(F.data.regexp(r"^stf_(dis|en|adm|role):\d{1,9}$"), IsAdmin())
 async def cb_staff_action(cq: CallbackQuery, s, staff: Staff):
     action, sid = cq.data.split(":")
     if not await _STAFF_ACTIONS[action](s, staff, int(sid)):
