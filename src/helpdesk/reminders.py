@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from helpdesk import clock
 from helpdesk.db.models import Ticket
+from helpdesk.tasks import reminders as task_reminders
 from helpdesk.tickets import service as tickets
 
 log = structlog.get_logger()
@@ -30,12 +31,18 @@ async def run_once(sf, after_min: int) -> int:
     return len(due)
 
 
-async def run(sf, after_min: int, stop: asyncio.Event, interval: float = 60.0) -> None:
+async def run(
+    sf, after_min: int, stop: asyncio.Event, interval: float = 60.0, task_remind_hour: int = 9
+) -> None:
     while not stop.is_set():
         try:
             await run_once(sf, after_min)
         except Exception:
             log.exception("reminders failed")
+        try:
+            await task_reminders.run_once(sf, task_remind_hour)
+        except Exception:
+            log.exception("task reminders failed")
         try:
             await asyncio.wait_for(stop.wait(), interval)
         except TimeoutError:

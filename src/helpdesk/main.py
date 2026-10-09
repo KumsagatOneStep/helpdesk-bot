@@ -39,7 +39,11 @@ async def amain() -> None:
     tasks = [
         asyncio.create_task(worker.run(sf, green, AiogramSender(bot), stop)),
         asyncio.create_task(poller.run(sf, green, settings.files_dir, stop)),
-        asyncio.create_task(reminders.run(sf, settings.remind_after_min, stop)),
+        asyncio.create_task(
+            reminders.run(
+                sf, settings.remind_after_min, stop, task_remind_hour=settings.task_remind_hour
+            )
+        ),
     ]
     try:
         await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in BOT_COMMANDS])
