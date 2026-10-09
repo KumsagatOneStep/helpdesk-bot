@@ -10,7 +10,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from helpdesk import clock
 from helpdesk.config import Settings
 from helpdesk.db import queries
-from helpdesk.db.models import Client, Staff, Ticket
+from helpdesk.db.models import Client, Staff, Task, Ticket
 from helpdesk.staff import service as staff_svc
 from helpdesk.stats import export
 from helpdesk.stats import service as stats
@@ -140,7 +140,7 @@ async def cmd_my(message: Message, s, staff: Staff):
         await message.answer("У вас нет заявок и задач в работе.")
         return
     today = tasks.today()
-    parts, buttons = [], None
+    parts, buttons = [], []
     if rows:
         lines = [
             f"{'▶️ ' if t.id == staff.active_ticket_id else ''}#{t.id} · {_cname(c)}"
@@ -148,6 +148,8 @@ async def cmd_my(message: Message, s, staff: Staff):
         ]
         parts.append("Ваши заявки в работе:\n" + "\n".join(lines))
         buttons = [[(f"Перейти к #{t.id}", f"goto:{t.id}")] for t, _ in rows]
+    if rows or mine:
+        buttons.append([("✅ Закрыть…", "cls_pick")])
     if mine:
         parts.append("Мои задачи:\n" + "\n".join(task_render.list_line(t, today) for t in mine))
     if waiting:
@@ -204,6 +206,75 @@ async def cb_return(cq: CallbackQuery, s, staff: Staff):
         return
     await _drop_buttons(cq)
     await cq.message.answer(f"↩️ Заявка #{tid} возвращена в очередь.")
+    await cq.answer()
+
+
+# ---------- закрытие из «Мои заявки» ----------
+
+
+def _confirm_buttons(kind: str, item_id: int):
+    return [[("✅ Да, закрыть", f"cls_yes_{kind}:{item_id}"), ("↩️ Назад", "cls_pick")]]
+
+
+@router.callback_query(F.data == "cls_pick", IsActive())
+async def cb_close_pick(cq: CallbackQuery, s, staff: Staff):
+    items = [(f"#{t.id}", f"cls_tkt:{t.id}") for t, _ in await tickets.my_tickets(s, staff)]
+    items += [(task_render.number(t), f"cls_task:{t.id}") for t in await tasks.my_tasks(s, staff)]
+    if not items:
+        await cq.answer("Закрывать нечего", show_alert=True)
+        return
+    rows = [items[i : i + 3] for i in range(0, len(items), 3)]
+    rows.append([("✖️ Отмена", "cls_cancel")])
+    await cq.message.edit_text("Что закрыть?", reply_markup=markup(rows))
+    await cq.answer()
+
+
+@router.callback_query(F.data.regexp(_ID_DATA.format("cls_task")), IsActive())
+async def cb_close_ask_task(cq: CallbackQuery, s, staff: Staff):
+    t = await s.get(Task, _arg_id(cq))
+    if t is None or t.status != "in_progress" or t.assignee_id != staff.id:
+        await cq.answer("Задача уже не у вас или закрыта", show_alert=True)
+        return
+    text = f"Закрыть {task_render.number(t)} · {task_render.short(t.description, 60)}?"
+    await cq.message.edit_text(text, reply_markup=markup(_confirm_buttons("task", t.id)))
+    await cq.answer()
+
+
+@router.callback_query(F.data.regexp(_ID_DATA.format("cls_tkt")), IsActive())
+async def cb_close_ask_ticket(cq: CallbackQuery, s, staff: Staff):
+    t = await s.get(Ticket, _arg_id(cq))
+    if t is None or t.status != "in_progress" or t.assignee_id != staff.id:
+        await cq.answer("Заявка уже не у вас или закрыта", show_alert=True)
+        return
+    c = await s.get(Client, t.client_id)
+    text = f"Закрыть #{t.id} · {_cname(c)}?\nПользователю уйдёт «Заявка выполнена»."
+    await cq.message.edit_text(text, reply_markup=markup(_confirm_buttons("tkt", t.id)))
+    await cq.answer()
+
+
+@router.callback_query(F.data.regexp(_ID_DATA.format("cls_yes_task")), IsActive())
+async def cb_close_yes_task(cq: CallbackQuery, s, staff: Staff):
+    tid = _arg_id(cq)
+    if not await tasks.close(s, tid, staff):
+        await cq.answer("Уже закрыта или нет прав", show_alert=True)
+        return
+    await cq.message.edit_text(f"✔️ З-{tid} закрыта", reply_markup=None)
+    await cq.answer()
+
+
+@router.callback_query(F.data.regexp(_ID_DATA.format("cls_yes_tkt")), IsActive())
+async def cb_close_yes_ticket(cq: CallbackQuery, s, staff: Staff):
+    tid = _arg_id(cq)
+    if not await tickets.close_ticket(s, tid, staff):
+        await cq.answer("Заявка уже не у вас или закрыта", show_alert=True)
+        return
+    await cq.message.edit_text(f"✔️ Заявка #{tid} закрыта", reply_markup=None)
+    await cq.answer()
+
+
+@router.callback_query(F.data == "cls_cancel", IsActive())
+async def cb_close_cancel(cq: CallbackQuery):
+    await cq.message.edit_text("Отменено.", reply_markup=None)
     await cq.answer()
 
 

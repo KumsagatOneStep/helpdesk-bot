@@ -353,3 +353,143 @@ async def test_malformed_task_callbacks_not_handled_by_task_router(data):
         passed, _ = await h.check(_cq(data), staff=admin)
         assert not passed, h.callback.__name__
     assert await _matched_handler(data) == "cb_fallback"
+
+
+class _EditMsg:
+    def __init__(self, chat_id):
+        self.chat = SimpleNamespace(id=chat_id)
+        self.edits = []
+
+    async def edit_text(self, text, reply_markup=None, **kw):
+        self.edits.append((text, reply_markup))
+
+
+class _CloseCq:
+    def __init__(self, data, chat_id):
+        self.data = data
+        self.message = _EditMsg(chat_id)
+        self.alerts = []
+
+    async def answer(self, text=None, show_alert=False):
+        self.alerts.append(text)
+
+
+def _kb(m):
+    return [[(b.text, b.callback_data) for b in row] for row in m.inline_keyboard] if m else None
+
+
+async def test_my_has_close_button_only_when_something_to_close(s, clock_):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    await make_task(s, erlan)
+    msg = FakeChatMessage(6)
+    sent = []
+
+    async def answer(text, reply_markup=None, **kw):
+        sent.append(_kb(reply_markup))
+        return _Sent()
+
+    msg.answer = answer
+    await handlers.cmd_my(msg, s, erlan)
+    assert sent[-1] == [[("✅ Закрыть…", "cls_pick")]]
+    tima = await make_staff(s, tg_id=7, name="Тимур")
+    await make_task(s, erlan, status="queued", assignee=None)
+    msg2 = FakeChatMessage(7)
+    msg2.answer = answer
+    await handlers.cmd_my(msg2, s, tima)  # только «Ждут исполнителя» — закрывать нечего
+    assert sent[-1] is None
+
+
+async def test_close_picker_lists_own_tickets_and_tasks(s, clock_):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    tima = await make_staff(s, tg_id=7, name="Тимур")
+    ticket = await make_ticket(s, await make_client(s), status="in_progress", assignee=erlan)
+    t1 = await make_task(s, erlan)
+    t2 = await make_task(s, erlan)
+    await make_task(s, tima)  # чужая
+    await make_task(s, erlan, status="closed")
+    cq = _CloseCq("cls_pick", 6)
+    await handlers.cb_close_pick(cq, s, erlan)
+    text, kb = cq.message.edits[-1]
+    assert text == "Что закрыть?"
+    assert _kb(kb) == [
+        [
+            (f"#{ticket.id}", f"cls_tkt:{ticket.id}"),
+            (f"З-{t1.id}", f"cls_task:{t1.id}"),
+            (f"З-{t2.id}", f"cls_task:{t2.id}"),
+        ],
+        [("✖️ Отмена", "cls_cancel")],
+    ]
+    empty = _CloseCq("cls_pick", 7)
+    tima_task = (await tasks_svc.my_tasks(s, tima))[0]
+    tima_task.status = "closed"
+    await s.flush()
+    await handlers.cb_close_pick(empty, s, tima)
+    assert empty.alerts == ["Закрывать нечего"]
+
+
+async def test_close_task_via_confirm(s, clock_):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    tima = await make_staff(s, tg_id=7, name="Тимур")
+    t = await make_task(s, erlan, description="Заменить картридж")
+    cq = _CloseCq(f"cls_task:{t.id}", 6)
+    await handlers.cb_close_ask_task(cq, s, erlan)
+    text, kb = cq.message.edits[-1]
+    assert text == f"Закрыть З-{t.id} · Заменить картридж?"
+    assert _kb(kb) == [[("✅ Да, закрыть", f"cls_yes_task:{t.id}"), ("↩️ Назад", "cls_pick")]]
+    foreign = _CloseCq(f"cls_task:{t.id}", 7)
+    await handlers.cb_close_ask_task(foreign, s, tima)
+    assert foreign.alerts == ["Задача уже не у вас или закрыта"]
+    yes = _CloseCq(f"cls_yes_task:{t.id}", 6)
+    await handlers.cb_close_yes_task(yes, s, erlan)
+    await s.refresh(t)
+    assert t.status == "closed" and yes.message.edits[-1] == (f"✔️ З-{t.id} закрыта", None)
+    again = _CloseCq(f"cls_yes_task:{t.id}", 6)
+    await handlers.cb_close_yes_task(again, s, erlan)
+    assert again.alerts == ["Уже закрыта или нет прав"]
+
+
+async def test_close_ticket_via_confirm_notifies_client(s, clock_):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    tima = await make_staff(s, tg_id=7, name="Тимур")
+    c = await make_client(s)
+    ticket = await make_ticket(s, c, status="in_progress", assignee=erlan)
+    cq = _CloseCq(f"cls_tkt:{ticket.id}", 6)
+    await handlers.cb_close_ask_ticket(cq, s, erlan)
+    text, kb = cq.message.edits[-1]
+    assert text == (
+        f"Закрыть #{ticket.id} · Айгерим Сериккызы?\nПользователю уйдёт «Заявка выполнена»."
+    )
+    assert _kb(kb) == [[("✅ Да, закрыть", f"cls_yes_tkt:{ticket.id}"), ("↩️ Назад", "cls_pick")]]
+    foreign = _CloseCq(f"cls_yes_tkt:{ticket.id}", 7)
+    await handlers.cb_close_yes_ticket(foreign, s, tima)
+    assert foreign.alerts == ["Заявка уже не у вас или закрыта"]
+    yes = _CloseCq(f"cls_yes_tkt:{ticket.id}", 6)
+    await handlers.cb_close_yes_ticket(yes, s, erlan)
+    await s.refresh(ticket)
+    assert ticket.status == "closed"
+    assert yes.message.edits[-1] == (f"✔️ Заявка #{ticket.id} закрыта", None)
+    wa = (await s.scalars(select(Outbox).where(Outbox.channel == "wa"))).all()
+    assert len(wa) == 1
+
+
+async def test_close_cancel():
+    cq = _CloseCq("cls_cancel", 6)
+    await handlers.cb_close_cancel(cq)
+    assert cq.message.edits[-1] == ("Отменено.", None)
+
+
+@pytest.mark.parametrize(
+    "data,name",
+    [
+        ("cls_pick", "cb_close_pick"),
+        ("cls_task:3", "cb_close_ask_task"),
+        ("cls_tkt:3", "cb_close_ask_ticket"),
+        ("cls_yes_task:3", "cb_close_yes_task"),
+        ("cls_yes_tkt:3", "cb_close_yes_ticket"),
+        ("cls_cancel", "cb_close_cancel"),
+        ("cls_task:x", "cb_fallback"),
+        ("cls_yes_tkt:1:2", "cb_fallback"),
+    ],
+)
+async def test_close_callbacks_routing(data, name):
+    assert await _matched_handler(data) == name
