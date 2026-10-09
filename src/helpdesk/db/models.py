@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -40,6 +40,7 @@ class Staff(Base):
     is_admin: Mapped[bool] = mapped_column(default=False)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     on_shift: Mapped[bool] = mapped_column(default=True)
+    role: Mapped[str] = mapped_column(String(16), default="helpdesk", server_default="helpdesk")
     active_ticket_id: Mapped[int | None]
     created_at: Mapped[datetime] = mapped_column(default=_now)
 
@@ -122,3 +123,62 @@ class Outbox(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=_now)
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+    __table_args__ = (Index("ix_tasks_status_due", "status", "due_date"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))  # helpdesk | coordinator
+    status: Mapped[str] = mapped_column(String(16))  # queued | in_progress | closed
+    description: Mapped[str] = mapped_column(Text)
+    requester: Mapped[str | None] = mapped_column(String(200))
+    due_date: Mapped[date | None]
+    last_reminded_on: Mapped[date | None]
+    file_path: Mapped[str | None] = mapped_column(String(500))
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    file_kind: Mapped[str | None] = mapped_column(String(16))  # photo | document
+    creator_id: Mapped[int] = mapped_column(ForeignKey("staff.id"))
+    assignee_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"))
+    closed_by_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"))
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+    taken_at: Mapped[datetime | None]
+    closed_at: Mapped[datetime | None]
+
+
+class TaskComment(Base):
+    __tablename__ = "task_comments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
+    staff_id: Mapped[int] = mapped_column(ForeignKey("staff.id"))
+    kind: Mapped[str] = mapped_column(String(16))  # text|image|document|audio|video
+    text: Mapped[str | None] = mapped_column(Text)
+    file_path: Mapped[str | None] = mapped_column(String(500))
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+
+
+class TaskEvent(Base):
+    __tablename__ = "task_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
+    type: Mapped[str] = mapped_column(String(32))
+    staff_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"))
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+
+
+class TaskCard(Base):
+    __tablename__ = "task_cards"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
+    staff_id: Mapped[int] = mapped_column(ForeignKey("staff.id"))
+    tg_chat_id: Mapped[int] = mapped_column(BigInteger)
+    tg_message_id: Mapped[int] = mapped_column(BigInteger)
+    sent_at: Mapped[datetime] = mapped_column(default=_now)
+
+
+class TaskLink(Base):
+    __tablename__ = "task_links"
+    tg_chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tg_message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))

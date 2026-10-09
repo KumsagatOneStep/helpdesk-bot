@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     database_url: str
     tz: str = "Asia/Almaty"
     remind_after_min: int = 10
+    task_remind_hour: int = 9
     files_dir: str = "/data/files"
 
     @property
