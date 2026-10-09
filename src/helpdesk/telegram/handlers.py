@@ -2,7 +2,7 @@ import os
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandObject, CommandStart, Filter
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
@@ -13,7 +13,10 @@ from helpdesk.db.models import Client, Staff, Ticket
 from helpdesk.staff import service as staff_svc
 from helpdesk.stats import export
 from helpdesk.stats import service as stats
-from helpdesk.telegram import menu
+from helpdesk.telegram import menu, task_handlers
+from helpdesk.telegram.filters import ID_DATA as _ID_DATA
+from helpdesk.telegram.filters import IsActive, IsAdmin
+from helpdesk.telegram.filters import arg_id as _arg_id
 from helpdesk.telegram.gateway import AiogramSender, markup
 from helpdesk.telegram.media import FileTooBig, extract_content
 from helpdesk.telegram.middleware import DbMiddleware
@@ -56,24 +59,6 @@ HELP = (
 
 class SearchForm(StatesGroup):
     query = State()
-
-
-class IsActive(Filter):
-    async def __call__(self, event, staff: Staff | None = None) -> bool:
-        return staff is not None and staff.status == "active"
-
-
-class IsAdmin(Filter):
-    async def __call__(self, event, staff: Staff | None = None) -> bool:
-        return staff is not None and staff.status == "active" and staff.is_admin
-
-
-# id из callback_data: только цифры и не больше int4 — подделка уходит в cb_fallback
-_ID_DATA = r"^{}:\d{{1,9}}$"
-
-
-def _arg_id(cq: CallbackQuery) -> int:
-    return int(cq.data.split(":", 1)[1])
 
 
 def _cname(c: Client) -> str:
@@ -448,6 +433,8 @@ async def cb_fallback(cq: CallbackQuery):
 
 def setup(dp: Dispatcher, sf) -> None:
     mw = DbMiddleware(sf)
-    router.message.outer_middleware(mw)
-    router.callback_query.outer_middleware(mw)
+    for r in (task_handlers.router, router):
+        r.message.outer_middleware(mw)
+        r.callback_query.outer_middleware(mw)
+    dp.include_router(task_handlers.router)  # раньше общего: у общего есть catch-all
     dp.include_router(router)

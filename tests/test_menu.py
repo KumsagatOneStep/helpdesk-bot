@@ -11,6 +11,7 @@ def _staff(**kw):
 def test_specialist_menu_on_shift():
     assert menu.menu_rows(_staff()) == [
         ["📋 Мои заявки", "📂 Открытые"],
+        ["➕ Новая задача"],
         ["🔍 Поиск", "📊 Статистика"],
         ["📥 Выгрузка", "🔴 Уйти со смены"],
     ]
@@ -18,7 +19,7 @@ def test_specialist_menu_on_shift():
 
 def test_shift_button_follows_state_and_admin_row():
     rows = menu.menu_rows(_staff(on_shift=False, is_admin=True))
-    assert rows[2][1] == "🟢 Выйти на смену"
+    assert rows[3][1] == "🟢 Выйти на смену"
     assert rows[-1] == ["👥 Специалисты"]
 
 

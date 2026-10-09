@@ -11,13 +11,17 @@ SHIFT_OFF = "🔴 Уйти со смены"
 SHIFT_ON = "🟢 Выйти на смену"
 STAFF = "👥 Специалисты"
 CANCEL = "✖️ Отмена"
+NEW_TASK = "➕ Новая задача"
 
-MENU_TEXTS = frozenset({MY, OPEN, SEARCH, STATS, EXPORT, SHIFT_OFF, SHIFT_ON, STAFF, CANCEL})
+MENU_TEXTS = frozenset(
+    {MY, OPEN, NEW_TASK, SEARCH, STATS, EXPORT, SHIFT_OFF, SHIFT_ON, STAFF, CANCEL}
+)
 
 
 def menu_rows(staff: Staff) -> list[list[str]]:
     rows = [
         [MY, OPEN],
+        [NEW_TASK],
         [SEARCH, STATS],
         [EXPORT, SHIFT_OFF if staff.on_shift else SHIFT_ON],
     ]
