@@ -2,10 +2,11 @@ from datetime import date
 from types import SimpleNamespace
 
 import pytest
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message
+from aiogram.types import Message, Update
 from sqlalchemy import select
 
 from helpdesk.db.models import Task
@@ -170,3 +171,51 @@ async def test_card_buttons(s, clock_):
     cq = Cq(f"tk_close:{t.id}")
     await task_handlers.cb_task_close(cq, s, tima)
     assert cq.alerts == ["Уже закрыта или нет прав"]
+
+
+async def _matched_names(msg: Message, raw_state: str, staff) -> list[str]:
+    out = []
+    for h in task_handlers.router.message.handlers:
+        ok, _ = await h.check(msg, staff=staff, raw_state=raw_state)
+        if ok:
+            out.append(h.callback.__name__)
+    return out
+
+
+async def test_menu_input_in_dialog_only_matched_by_leave_dialog():
+    staff = SimpleNamespace(status="active", is_admin=False)
+    photo = [{"file_id": "f", "file_unique_id": "u", "width": 1, "height": 1}]
+    for st in TaskForm.__all_states__:
+        for text in (menu.MY, "/my", "/on"):
+            assert await _matched_names(_message(text=text), st.state, staff) == ["leave_dialog"], (
+                st,
+                text,
+            )
+        assert await _matched_names(_message(text="что-то"), st.state, staff), st
+        assert await _matched_names(_message(photo=photo), st.state, staff), st
+        assert await _matched_names(_message(text=menu.CANCEL), st.state, staff) == [], st
+
+
+async def test_menu_button_in_dialog_reaches_main_router(s, clock_):
+    staff = await make_staff(s, tg_id=1, name="Ерлан")
+    seen = []
+    probe = Router()
+
+    @probe.message(F.text == menu.MY)
+    async def my(message: Message):
+        seen.append(message.text)
+
+    dp = Dispatcher()
+    dp.include_routers(task_handlers.router, probe)
+    try:
+        bot = Bot("123:abc")
+        key = StorageKey(bot_id=123, chat_id=1, user_id=1)
+        await dp.fsm.storage.set_state(key, TaskForm.description.state)
+        upd = Update.model_validate(
+            {"update_id": 1, "message": _message(text=menu.MY).model_dump(by_alias=True)}
+        )
+        await dp.feed_update(bot, upd, staff=staff)
+        assert seen == [menu.MY]
+        assert await dp.fsm.storage.get_state(key) is None
+    finally:
+        task_handlers.router._parent_router = None

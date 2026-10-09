@@ -41,6 +41,7 @@ DUE_BUTTONS = [
 ]
 CONFIRM_BUTTONS = [[("✅ Создать", "tkn_ok"), ("Отмена", "tkn_cancel")]]
 NOT_CANCEL = F.text != menu.CANCEL
+NOT_LEAVING = ~F.text.func(lambda text: leaves_dialog(text))
 
 
 def leaves_dialog(text: str | None) -> bool:
@@ -135,7 +136,7 @@ async def got_attachment(message: Message, state: FSMContext, bot, settings: Set
     await _ask_requester(message, state)
 
 
-@router.message(TaskForm.description, IsActive(), NOT_CANCEL)
+@router.message(TaskForm.description, IsActive(), NOT_CANCEL, NOT_LEAVING)
 async def bad_description(message: Message):
     await message.answer("Пришлите описание текстом, фото или файлом.")
 
@@ -235,7 +236,7 @@ async def cancel_create(cq: CallbackQuery, state: FSMContext, staff: Staff):
     await cq.answer()
 
 
-@router.message(StateFilter(TaskForm), IsActive(), NOT_CANCEL)
+@router.message(StateFilter(TaskForm), IsActive(), NOT_CANCEL, NOT_LEAVING)
 async def stray_input(message: Message):
     """Лишний ввод посреди диалога не должен уйти клиенту как ответ."""
     await message.answer("Используйте кнопки выше или «✖️ Отмена».")
