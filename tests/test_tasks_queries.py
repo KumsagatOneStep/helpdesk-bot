@@ -1,6 +1,6 @@
 from datetime import date
 
-from helpdesk.db.models import TaskComment
+from helpdesk.db.models import TaskCard, TaskComment
 from helpdesk.tasks import service as tasks
 from tests.factories import clear_outbox, make_staff, make_task, payloads
 
@@ -96,3 +96,14 @@ async def test_search_by_requester_and_recent_comments(s, clock_):
         s.add(TaskComment(task_id=t.id, staff_id=erlan.id, kind="text", text=f"c{i}"))
     await s.flush()
     assert [c.text for c in await tasks.recent_comments(s, t.id)] == ["c2", "c3", "c4", "c5", "c6"]
+
+
+async def test_deliver_queue_skips_tasks_already_carded(s, clock_):
+    erlan, tima, coord = await _team(s)
+    q = await make_task(s, erlan, status="queued", assignee=None)
+    s.add(TaskCard(task_id=q.id, staff_id=tima.id, tg_chat_id=2, tg_message_id=7))
+    await s.flush()
+    await clear_outbox(s)
+    assert await tasks.deliver_queue_to(s, tima) == 0
+    assert await payloads(s, "tg") == []
+    assert await tasks.deliver_queue_to(s, coord) == 1

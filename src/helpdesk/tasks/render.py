@@ -138,8 +138,20 @@ def _comment_line(c: TaskComment, names: dict[int, str]) -> str:
     return f"{clock.local(c.created_at):%d.%m %H:%M} {names.get(c.staff_id, '?')}: {body}"
 
 
+MAX_DETAILS = 4000
+
+
 def details(t: Task, names: dict[int, str], comments: list[TaskComment], today: date) -> str:
     text = card(t, names, today)
-    if comments:
-        text += "\n\nКомментарии:\n" + "\n".join(_comment_line(c, names) for c in comments)
-    return text[-4000:] if len(text) > 4000 else text
+    if not comments:
+        return text[:MAX_DETAILS]
+    head = text + "\n\nКомментарии:\n"
+    room = MAX_DETAILS - len(head)
+    if room <= 0:
+        return text[:MAX_DETAILS]
+    lines = [_comment_line(c, names) for c in comments]
+    body = "\n".join(lines)
+    while len(body) > room and len(lines) > 1:
+        lines.pop(0)
+        body = "\n".join(lines)
+    return head + body[-room:]

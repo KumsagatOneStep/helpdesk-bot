@@ -136,3 +136,14 @@ async def test_summary_and_lines(s, clock_):
     d = render.details(t, names, [c], TODAY)
     assert d.startswith(f"📌 З-{t.id} · Helpdesk")
     assert d.endswith("Комментарии:\n07.10 14:00 Ерлан: [🖼 фото] скрин")
+
+
+async def test_details_long_comments_keep_card_header(s, clock_):
+    erlan = await make_staff(s, tg_id=1, name="Ерлан")
+    t = await make_task(s, erlan)
+    comments = [TaskComment(task_id=t.id, staff_id=erlan.id, text="к" * 300) for _ in range(30)]
+    for c in comments:
+        c.created_at = clock_.now
+    out = render.details(t, {erlan.id: "Ерлан"}, comments, date(2026, 10, 7))
+    assert out.startswith(f"📌 З-{t.id}")
+    assert len(out) <= 4000

@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import BotCommand
 
 from helpdesk import clock, reminders
@@ -31,7 +32,7 @@ async def amain() -> None:
         settings.green_api_id_instance,
         settings.green_api_token,
     )
-    dp = Dispatcher()
+    dp = Dispatcher(events_isolation=SimpleEventIsolation())
     dp["settings"] = settings
     setup(dp, sf)
 

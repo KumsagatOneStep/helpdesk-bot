@@ -189,7 +189,7 @@ async def _tasks_dataset(s, now):
         due_date=date(2026, 10, 6),
         description="=SUM(A1)",
     )
-    late.closed_at, late.closed_by_id = now, coord.id
+    late.closed_at, late.closed_by_id = now, erlan.id
     overdue = await make_task(s, erlan, due_date=date(2026, 10, 5), requester="каб. 1")
     old = await make_task(s, erlan)
     old.created_at = now - timedelta(days=40)

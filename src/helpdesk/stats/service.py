@@ -186,7 +186,7 @@ async def compute_tasks(s, start, end, today: date) -> TaskStats:
     }
     late = sum(1 for t in closed if t.due_date and clock.local(t.closed_at).date() > t.due_date)
     names = await queries.staff_names(s)
-    per = Counter(t.closed_by_id for t in closed)
+    per = Counter(t.assignee_id or t.closed_by_id for t in closed)
     per_staff = sorted(
         ((names.get(i, "?"), n) for i, n in per.items()), key=lambda x: (-x[1], x[0])
     )

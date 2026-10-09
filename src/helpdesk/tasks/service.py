@@ -5,7 +5,7 @@ from sqlalchemy import or_, select
 
 from helpdesk import clock
 from helpdesk.db import queries
-from helpdesk.db.models import Staff, Task, TaskComment, TaskEvent, TaskLink
+from helpdesk.db.models import Staff, Task, TaskCard, TaskComment, TaskEvent, TaskLink
 from helpdesk.delivery import outbox
 from helpdesk.delivery.outbox import Buttons
 from helpdesk.tasks import render, rules
@@ -278,7 +278,8 @@ async def queued_for(s, staff: Staff) -> list[Task]:
 
 
 async def deliver_queue_to(s, staff: Staff) -> int:
-    rows = await queued_for(s, staff)
+    carded = set(await s.scalars(select(TaskCard.task_id).where(TaskCard.staff_id == staff.id)))
+    rows = [t for t in await queued_for(s, staff) if t.id not in carded]
     names = await queries.staff_names(s)
     for t in rows:
         await _send_card(s, t, staff, names, header="🆘 Задаче нужен исполнитель", with_file=False)
