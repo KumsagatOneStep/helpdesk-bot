@@ -8,7 +8,16 @@ from sqlalchemy.orm import aliased
 
 from helpdesk import clock
 from helpdesk.db import queries
-from helpdesk.db.models import Outbox, Staff, TgCard, TgLink, Ticket, TicketEvent
+from helpdesk.db.models import (
+    Outbox,
+    Staff,
+    TaskCard,
+    TaskLink,
+    TgCard,
+    TgLink,
+    Ticket,
+    TicketEvent,
+)
 from helpdesk.delivery import outbox
 
 log = structlog.get_logger()
@@ -144,8 +153,36 @@ async def _deliver(s, item: Outbox, wa, tg) -> None:
                     has_button=bool(p.get("buttons")),
                 )
             )
+        if p.get("task_id") is not None:
+            await s.merge(
+                TaskLink(tg_chat_id=p["chat_id"], tg_message_id=mid, task_id=p["task_id"])
+            )
+        if p.get("task_card_staff_id") is not None:
+            s.add(
+                TaskCard(
+                    task_id=p["task_id"],
+                    staff_id=p["task_card_staff_id"],
+                    tg_chat_id=p["chat_id"],
+                    tg_message_id=mid,
+                )
+            )
     elif op == "edit":
         await tg.edit(p["chat_id"], p["message_id"], p["text"], p.get("buttons"))
+    elif op == "task_edit":
+        q = (
+            select(TaskCard)
+            .where(TaskCard.task_id == p["task_id"], TaskCard.staff_id == p["staff_id"])
+            .order_by(TaskCard.id)
+        )
+        cards = (await s.scalars(q)).all()
+        if not cards:
+            item.status = "skipped"
+            return
+        for card in cards:
+            try:
+                await tg.edit(card.tg_chat_id, card.tg_message_id, p["text"], p.get("buttons"))
+            except PermanentSendError as e:  # карточку удалили в чате — остальные всё равно правим
+                log.info("task card edit failed", card_id=card.id, error=str(e))
     elif op == "delete_card":
         card = await s.get(TgCard, p["card_id"])
         if card is None or card.state != "deleting":

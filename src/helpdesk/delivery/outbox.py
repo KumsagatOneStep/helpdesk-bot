@@ -39,6 +39,8 @@ def tg_send(
     ticket_id: int | None = None,
     card_staff_id: int | None = None,
     card_seq: int | None = None,
+    task_id: int | None = None,
+    task_card_staff_id: int | None = None,
 ) -> None:
     payload = {
         "op": "send",
@@ -51,6 +53,10 @@ def tg_send(
         "card_staff_id": card_staff_id,
         "card_seq": card_seq,
     }
+    if task_id is not None:
+        payload["task_id"] = task_id
+    if task_card_staff_id is not None:
+        payload["task_card_staff_id"] = task_card_staff_id
     _add(s, "tg", f"tg:{chat_id}", payload)
 
 
@@ -59,6 +65,21 @@ def tg_edit(s, chat_id: int, message_id: int, text: str, buttons: Buttons | None
         "op": "edit",
         "chat_id": chat_id,
         "message_id": message_id,
+        "text": text,
+        "buttons": _buttons(buttons),
+    }
+    _add(s, "tg", f"tg:{chat_id}", payload)
+
+
+def tg_task_edit(
+    s, chat_id: int, *, task_id: int, staff_id: int, text: str, buttons: Buttons | None
+) -> None:
+    """Перерисовать все карточки задачи у получателя (message_id узнаёт воркер)."""
+    payload = {
+        "op": "task_edit",
+        "chat_id": chat_id,
+        "task_id": task_id,
+        "staff_id": staff_id,
         "text": text,
         "buttons": _buttons(buttons),
     }

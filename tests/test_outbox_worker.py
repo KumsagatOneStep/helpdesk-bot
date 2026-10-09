@@ -2,10 +2,10 @@ import asyncio
 
 from sqlalchemy import select
 
-from helpdesk.db.models import Outbox, Staff, TgCard, TgLink, TicketEvent
+from helpdesk.db.models import Outbox, Staff, TaskCard, TaskLink, TgCard, TgLink, TicketEvent
 from helpdesk.delivery import outbox, worker
 from helpdesk.tickets import service as tickets
-from tests.factories import make_client, make_staff, make_ticket
+from tests.factories import make_client, make_staff, make_task, make_ticket
 from tests.fakes import FakeTg, FakeWa
 
 
@@ -209,3 +209,84 @@ async def test_permanent_tg_error_fails_at_once_and_unblocks_chat(sf, clock_):
         first = await s.scalar(select(Outbox).order_by(Outbox.id))
         assert (first.status, first.attempts) == ("failed", 1)
         assert "blocked" in first.last_error
+
+
+async def test_task_send_creates_link_and_card(sf, clock_):
+    async with sf() as s, s.begin():
+        st = await make_staff(s, tg_id=7, name="Ерлан")
+        t = await make_task(s, st)
+        outbox.tg_send(s, 7, text="карточка", task_id=t.id, task_card_staff_id=st.id)
+        outbox.tg_send(s, 7, text="уведомление", task_id=t.id)
+        tid, sid = t.id, st.id
+    tg = FakeTg()
+    await drain(sf, FakeWa(), tg)
+    async with sf() as s:
+        links = (await s.scalars(select(TaskLink))).all()
+        cards = (await s.scalars(select(TaskCard))).all()
+    assert sorted(lk.tg_message_id for lk in links) == [m["mid"] for m in tg.sent]
+    assert all(lk.task_id == tid for lk in links)
+    assert [(c.task_id, c.staff_id, c.tg_message_id) for c in cards] == [
+        (tid, sid, tg.sent[0]["mid"])
+    ]
+
+
+async def test_ticket_payload_has_no_task_keys():
+    class S:
+        def add(self, obj):
+            self.obj = obj
+
+    s = S()
+    outbox.tg_send(s, 1, text="x", ticket_id=5)
+    assert "task_id" not in s.obj.payload and "task_card_staff_id" not in s.obj.payload
+
+
+async def test_task_edit_updates_all_cards_of_recipient(sf, clock_):
+    async with sf() as s, s.begin():
+        st = await make_staff(s, tg_id=7, name="Ерлан")
+        other = await make_staff(s, tg_id=8, name="Тимур")
+        t = await make_task(s, st)
+        s.add_all(
+            [
+                TaskCard(task_id=t.id, staff_id=st.id, tg_chat_id=7, tg_message_id=11),
+                TaskCard(task_id=t.id, staff_id=st.id, tg_chat_id=7, tg_message_id=12),
+                TaskCard(task_id=t.id, staff_id=other.id, tg_chat_id=8, tg_message_id=13),
+            ]
+        )
+        outbox.tg_task_edit(
+            s, 7, task_id=t.id, staff_id=st.id, text="новый", buttons=[[("A", "tk_close:1")]]
+        )
+        outbox.tg_task_edit(s, 9, task_id=t.id, staff_id=999, text="никому", buttons=None)
+    tg = FakeTg()
+    await drain(sf, FakeWa(), tg)
+    assert tg.edited == [
+        (7, 11, "новый", [[["A", "tk_close:1"]]]),
+        (7, 12, "новый", [[["A", "tk_close:1"]]]),
+    ]
+    async with sf() as s:
+        statuses = [o.status for o in (await s.scalars(select(Outbox).order_by(Outbox.id))).all()]
+    assert statuses == ["sent", "skipped"]
+
+
+async def test_task_edit_skips_card_with_permanent_error(sf, clock_):
+    async with sf() as s, s.begin():
+        st = await make_staff(s, tg_id=7, name="Ерлан")
+        t = await make_task(s, st)
+        s.add_all(
+            [
+                TaskCard(task_id=t.id, staff_id=st.id, tg_chat_id=7, tg_message_id=11),
+                TaskCard(task_id=t.id, staff_id=st.id, tg_chat_id=7, tg_message_id=12),
+            ]
+        )
+        outbox.tg_task_edit(s, 7, task_id=t.id, staff_id=st.id, text="новый", buttons=None)
+
+    class Tg(FakeTg):
+        async def edit(self, chat_id, message_id, text, buttons):
+            if message_id == 11:
+                raise worker.PermanentSendError("message to edit not found")
+            await super().edit(chat_id, message_id, text, buttons)
+
+    tg = Tg()
+    await drain(sf, FakeWa(), tg)
+    assert [e[1] for e in tg.edited] == [12]
+    async with sf() as s:
+        assert (await s.scalar(select(Outbox))).status == "sent"
