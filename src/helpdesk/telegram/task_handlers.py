@@ -13,7 +13,7 @@ from helpdesk.db.models import Staff
 from helpdesk.tasks import render
 from helpdesk.tasks import service as tasks
 from helpdesk.telegram import menu
-from helpdesk.telegram.filters import IsActive
+from helpdesk.telegram.filters import ID_DATA, IsActive, arg_id
 from helpdesk.telegram.gateway import markup
 from helpdesk.telegram.media import FileTooBig, extract_content
 from helpdesk.tickets.service import TG_FILE_KIND
@@ -239,6 +239,37 @@ async def cancel_create(cq: CallbackQuery, state: FSMContext, staff: Staff):
 async def stray_input(message: Message):
     """Лишний ввод посреди диалога не должен уйти клиенту как ответ."""
     await message.answer("Используйте кнопки выше или «✖️ Отмена».")
+
+
+HELP_ANSWERS = {
+    "ok": ("Попросили помощи — карточка ушла коллегам на смене", False),
+    "nobody": ("Сейчас никого на смене — задача осталась за вами", True),
+    "denied": ("Задача уже не у вас", True),
+}
+
+
+@router.callback_query(F.data.regexp(ID_DATA.format("tk_take")), IsActive())
+async def cb_task_take(cq: CallbackQuery, s, staff: Staff):
+    r = await tasks.take(s, arg_id(cq), staff)
+    if r.ok:
+        await cq.answer("Задача ваша ✅")
+    else:
+        text = f"Уже взял(а) {r.holder_name}" if r.holder_name else "Задача недоступна"
+        await cq.answer(text, show_alert=True)
+
+
+@router.callback_query(F.data.regexp(ID_DATA.format("tk_help")), IsActive())
+async def cb_task_help(cq: CallbackQuery, s, staff: Staff):
+    text, alert = HELP_ANSWERS[await tasks.ask_help(s, arg_id(cq), staff)]
+    await cq.answer(text, show_alert=alert)
+
+
+@router.callback_query(F.data.regexp(ID_DATA.format("tk_close")), IsActive())
+async def cb_task_close(cq: CallbackQuery, s, staff: Staff):
+    if await tasks.close(s, arg_id(cq), staff):
+        await cq.answer("Закрыта ✅")
+    else:
+        await cq.answer("Уже закрыта или нет прав", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("tkn_"))

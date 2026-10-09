@@ -4,15 +4,17 @@ from types import SimpleNamespace
 import pytest
 from aiogram import Dispatcher
 from aiogram.types import InlineKeyboardMarkup
+from sqlalchemy import select
 
 from helpdesk.db.models import Message as DbMessage
-from helpdesk.db.models import TgLink
+from helpdesk.db.models import Outbox, TaskComment, TgLink
+from helpdesk.tasks import service as tasks_svc
 from helpdesk.telegram import handlers
 from helpdesk.telegram.gateway import markup
 from helpdesk.telegram.media import MAX_BYTES, FileTooBig, extract_content
 from helpdesk.telegram.parsing import parse_client_args
 from helpdesk.tickets import service as tickets
-from tests.factories import make_client, make_staff, make_ticket
+from tests.factories import make_client, make_staff, make_task, make_ticket
 
 
 def test_parse_client_args():
@@ -231,3 +233,123 @@ def test_engine_hides_sql_parameters_in_errors():
 
     eng = make_engine("postgresql+asyncpg://u:p@localhost:1/x")
     assert eng.sync_engine.hide_parameters is True
+
+
+async def test_reply_to_task_card_is_comment_never_whatsapp(s, clock_, tmp_path):
+    c = await make_client(s)
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    tima = await make_staff(s, tg_id=7, name="Тимур")
+    ticket = await make_ticket(s, c, status="in_progress", assignee=erlan)
+    erlan.active_ticket_id = ticket.id
+    task = await make_task(s, tima)
+    await tasks_svc.link(s, 6, 3333, task.id)
+    await s.flush()
+    msg = FakeChatMessage(
+        6, text="Сейчас подойду", message_id=4343, reply_to_message=SimpleNamespace(message_id=3333)
+    )
+    await handlers._reply_to_client(
+        msg, s, erlan, FakeBot(), SimpleNamespace(files_dir=str(tmp_path))
+    )
+    assert msg.answers == [f"💬 → З-{task.id} ✓"]
+    assert (await s.scalars(select(Outbox).where(Outbox.channel == "wa"))).all() == []
+    [cm] = (await s.scalars(select(TaskComment))).all()
+    assert (cm.task_id, cm.text) == (task.id, "Сейчас подойду")
+    assert (await tasks_svc.task_for_reply(s, 6, 4343)).id == task.id
+
+
+async def test_reply_to_closed_or_hidden_task_is_refused(s, clock_, tmp_path):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    coord = await make_staff(s, tg_id=8, name="Айжан", role="coordinator")
+    closed = await make_task(s, erlan, status="closed")
+    hidden = await make_task(s, coord, kind="coordinator")
+    await tasks_svc.link(s, 6, 1, closed.id)
+    await tasks_svc.link(s, 6, 2, hidden.id)
+    settings = SimpleNamespace(files_dir=str(tmp_path))
+    m1 = FakeChatMessage(6, text="a", reply_to_message=SimpleNamespace(message_id=1))
+    await handlers._reply_to_client(m1, s, erlan, FakeBot(), settings)
+    assert m1.answers == [f"З-{closed.id} уже закрыта — комментарий не отправлен."]
+    m2 = FakeChatMessage(6, text="b", reply_to_message=SimpleNamespace(message_id=2))
+    await handlers._reply_to_client(m2, s, erlan, FakeBot(), settings)
+    assert m2.answers == ["Задача недоступна."]
+    assert (await s.scalars(select(TaskComment))).all() == []
+
+
+async def test_my_lists_tickets_and_tasks(s, clock_):
+    from datetime import date
+
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    mine = await make_task(s, erlan, due_date=date(2026, 10, 6), description="Картридж")
+    queued = await make_task(s, erlan, status="queued", assignee=None, description="Мышь")
+    msg = FakeChatMessage(6)
+    await handlers.cmd_my(msg, s, erlan)
+    assert msg.answers == [
+        f"Мои задачи:\n⚠️ З-{mine.id} · до 06.10 · Картридж\n\n"
+        f"Ждут исполнителя:\nЗ-{queued.id} · без срока · Мышь"
+    ]
+    empty = FakeChatMessage(7)
+    other = await make_staff(s, tg_id=7, name="Тимур", role="coordinator")
+    queued.status = "closed"
+    await s.flush()
+    await handlers.cmd_my(empty, s, other)
+    assert empty.answers == ["У вас нет заявок и задач в работе."]
+
+
+async def test_find_task_by_number_and_text(s, clock_):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    tima = await make_staff(s, tg_id=7, name="Тимур")
+    t = await make_task(s, erlan, description="Ноутбук не включается")
+    m = FakeChatMessage(7)
+    await handlers._find(m, s, tima, f"з-{t.id}")
+    assert m.answers[0].startswith(f"📌 З-{t.id} · Helpdesk")
+    assert (await tasks_svc.task_for_reply(s, 7, _Sent._next)).id == t.id
+    m2 = FakeChatMessage(7)
+    await handlers._find(m2, s, tima, "ноутбук")
+    assert m2.answers == [
+        f"Задачи:\nЗ-{t.id} · 07.10 · Ноутбук не включается · в работе · Ерлан\n\n"
+        "Подробнее: /find З-<номер>"
+    ]
+    m3 = FakeChatMessage(7)
+    await handlers._find(m3, s, tima, "З-999")
+    assert m3.answers == ["Задача не найдена."]
+
+
+async def test_open_lists_visible_tasks(s, clock_):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    t = await make_task(s, erlan, description="Картридж")
+    msg = FakeChatMessage(6)
+    await handlers.cmd_open(msg, s, erlan)
+    assert msg.answers == [
+        f"Открытых заявок нет 🎉\n\nОткрытые задачи:\nЗ-{t.id} · Helpdesk · Ерлан · Картридж"
+    ]
+
+
+@pytest.mark.parametrize(
+    "data,name",
+    [
+        ("tk_take:12", "cb_task_take"),
+        ("tk_help:3", "cb_task_help"),
+        ("tk_close:4", "cb_task_close"),
+    ],
+)
+async def test_task_callbacks_reach_handlers(data, name):
+    from helpdesk.telegram import task_handlers
+
+    admin = SimpleNamespace(status="active", is_admin=True)
+    found = ""
+    for h in task_handlers.router.callback_query.handlers:
+        passed, _ = await h.check(_cq(data), staff=admin)
+        if passed:
+            found = h.callback.__name__
+            break
+    assert found == name
+
+
+@pytest.mark.parametrize("data", ["tk_take:abc", "tk_close:1:2", "tk_help:99999999999"])
+async def test_malformed_task_callbacks_not_handled_by_task_router(data):
+    from helpdesk.telegram import task_handlers
+
+    admin = SimpleNamespace(status="active", is_admin=True)
+    for h in task_handlers.router.callback_query.handlers:
+        passed, _ = await h.check(_cq(data), staff=admin)
+        assert not passed, h.callback.__name__
+    assert await _matched_handler(data) == "cb_fallback"

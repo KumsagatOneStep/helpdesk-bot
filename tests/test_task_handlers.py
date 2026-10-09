@@ -11,7 +11,7 @@ from sqlalchemy import select
 from helpdesk.db.models import Task
 from helpdesk.telegram import menu, task_handlers
 from helpdesk.telegram.task_handlers import TaskForm
-from tests.factories import make_staff
+from tests.factories import make_staff, make_task
 
 
 class Msg:
@@ -149,3 +149,24 @@ async def test_stray_input_never_reaches_client_reply(st):
     photo = {"file_id": "f", "file_unique_id": "u", "width": 1, "height": 1}
     assert await _matched(_message(photo=[photo]), st.state, staff)
     assert not await _matched(_message(text=menu.CANCEL), st.state, staff)
+
+
+async def test_card_buttons(s, clock_):
+    erlan = await make_staff(s, tg_id=1, name="Ерлан")
+    tima = await make_staff(s, tg_id=2, name="Тимур")
+    t = await make_task(s, erlan)
+    cq = Cq(f"tk_help:{t.id}")
+    await task_handlers.cb_task_help(cq, s, erlan)
+    assert cq.alerts == ["Попросили помощи — карточка ушла коллегам на смене"]
+    cq = Cq(f"tk_take:{t.id}")
+    await task_handlers.cb_task_take(cq, s, tima)
+    assert cq.alerts == ["Задача ваша ✅"]
+    cq = Cq(f"tk_take:{t.id}")
+    await task_handlers.cb_task_take(cq, s, erlan)
+    assert cq.alerts == ["Уже взял(а) Тимур"]
+    cq = Cq(f"tk_close:{t.id}")
+    await task_handlers.cb_task_close(cq, s, tima)
+    assert cq.alerts == ["Закрыта ✅"]
+    cq = Cq(f"tk_close:{t.id}")
+    await task_handlers.cb_task_close(cq, s, tima)
+    assert cq.alerts == ["Уже закрыта или нет прав"]

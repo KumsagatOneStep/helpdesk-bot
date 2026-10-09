@@ -9,10 +9,14 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from helpdesk import clock
 from helpdesk.config import Settings
+from helpdesk.db import queries
 from helpdesk.db.models import Client, Staff, Ticket
 from helpdesk.staff import service as staff_svc
 from helpdesk.stats import export
 from helpdesk.stats import service as stats
+from helpdesk.tasks import render as task_render
+from helpdesk.tasks import rules as task_rules
+from helpdesk.tasks import service as tasks
 from helpdesk.telegram import menu, task_handlers
 from helpdesk.telegram.filters import ID_DATA as _ID_DATA
 from helpdesk.telegram.filters import IsActive, IsAdmin
@@ -50,6 +54,9 @@ HELP = (
     "/on, /off — на смене / не на смене\n"
     "/client <№> name|location <значение> — исправить данные пользователя\n"
     "/staff — специалисты (только админ)\n"
+    "➕ Новая задача — создать внутреннюю задачу (тип, описание, для кого, срок)\n"
+    "Комментарий к задаче — «Ответить» на её карточку или сообщение\n"
+    "/find З-12 — карточка задачи\n"
     "То же самое — кнопками меню под полем ввода.\n\n"
     "Ответ пользователю: просто напишите сообщение (текст, фото, файл, голосовое) — "
     "оно уйдёт в активную заявку. Чтобы ответить в другую заявку, нажмите «Ответить» "
@@ -127,14 +134,27 @@ async def cmd_off(message: Message, s, staff: Staff):
 @router.message(F.text == menu.MY, IsActive())
 async def cmd_my(message: Message, s, staff: Staff):
     rows = await tickets.my_tickets(s, staff)
-    if not rows:
-        await message.answer("У вас нет заявок в работе.")
+    mine = await tasks.my_tasks(s, staff)
+    waiting = await tasks.queued_for(s, staff)
+    if not rows and not mine and not waiting:
+        await message.answer("У вас нет заявок и задач в работе.")
         return
-    lines = [
-        f"{'▶️ ' if t.id == staff.active_ticket_id else ''}#{t.id} · {_cname(c)}" for t, c in rows
-    ]
-    buttons = [[(f"Перейти к #{t.id}", f"goto:{t.id}")] for t, _ in rows]
-    await message.answer("Ваши заявки в работе:\n" + "\n".join(lines), reply_markup=markup(buttons))
+    today = tasks.today()
+    parts, buttons = [], None
+    if rows:
+        lines = [
+            f"{'▶️ ' if t.id == staff.active_ticket_id else ''}#{t.id} · {_cname(c)}"
+            for t, c in rows
+        ]
+        parts.append("Ваши заявки в работе:\n" + "\n".join(lines))
+        buttons = [[(f"Перейти к #{t.id}", f"goto:{t.id}")] for t, _ in rows]
+    if mine:
+        parts.append("Мои задачи:\n" + "\n".join(task_render.list_line(t, today) for t in mine))
+    if waiting:
+        parts.append(
+            "Ждут исполнителя:\n" + "\n".join(task_render.list_line(t, today) for t in waiting)
+        )
+    await message.answer("\n\n".join(parts)[:4000], reply_markup=markup(buttons))
 
 
 @router.callback_query(F.data.regexp(_ID_DATA.format("goto")), IsActive())
@@ -192,8 +212,15 @@ async def cb_return(cq: CallbackQuery, s, staff: Staff):
 
 @router.message(Command("open"), IsActive())
 @router.message(F.text == menu.OPEN, IsActive())
-async def cmd_open(message: Message, s):
-    await message.answer(await stats.open_tickets_text(s))
+async def cmd_open(message: Message, s, staff: Staff):
+    text = await stats.open_tickets_text(s)
+    open_tasks = await tasks.open_tasks(s, staff)
+    if open_tasks:
+        names = await queries.staff_names(s)
+        today = tasks.today()
+        lines = [task_render.open_line(t, names, today) for t in open_tasks]
+        text += "\n\nОткрытые задачи:\n" + "\n".join(lines)
+    await message.answer(text[:4000])
 
 
 async def _send_details(message: Message, s, staff: Staff, tid: int) -> None:
@@ -216,7 +243,7 @@ async def _send_details(message: Message, s, staff: Staff, tid: int) -> None:
 async def cmd_find(message: Message, command: CommandObject, s, staff: Staff):
     q = (command.args or "").strip()
     if not q:
-        await message.answer("Использование: /find 125 | ФИО | кабинет | телефон")
+        await message.answer("Использование: /find 125 | З-12 | ФИО | кабинет | телефон")
         return
     await _find(message, s, staff, q)
 
@@ -225,7 +252,8 @@ async def cmd_find(message: Message, command: CommandObject, s, staff: Staff):
 async def menu_search(message: Message, state: FSMContext):
     await state.set_state(SearchForm.query)
     await message.answer(
-        "Введите номер заявки, ФИО, кабинет или телефон:", reply_markup=menu.cancel_menu()
+        "Введите номер заявки, З-номер задачи, ФИО, кабинет или телефон:",
+        reply_markup=menu.cancel_menu(),
     )
 
 
@@ -236,17 +264,45 @@ async def search_query(message: Message, s, staff: Staff, state: FSMContext):
     await _find(message, s, staff, message.text.strip())
 
 
+async def _send_task_details(message: Message, s, staff: Staff, task_id: int) -> None:
+    t = await tasks.get_visible(s, staff, task_id)
+    if t is None:
+        await message.answer("Задача не найдена.")
+        return
+    names = await queries.staff_names(s)
+    text = task_render.details(t, names, await tasks.recent_comments(s, t.id), tasks.today())
+    help_ok = t.assignee_id == staff.id and await tasks.can_help(s, t, staff)
+    buttons = task_render.buttons_for(t, staff, can_help=help_ok) or []
+    has_close = any(data.startswith("tk_close:") for row in buttons for _, data in row)
+    if staff.is_admin and t.status != "closed" and not has_close:
+        buttons = [*buttons, [("✅ Закрыть", f"tk_close:{t.id}")]]
+    sent = await message.answer(text, reply_markup=markup(buttons))
+    await tasks.link(s, staff.tg_chat_id, sent.message_id, t.id)
+
+
 async def _find(message: Message, s, staff: Staff, q: str) -> None:
     tid = stats.parse_ticket_id(q)
     if tid is not None:
         await _send_details(message, s, staff, tid)
         return
+    task_id = task_render.parse_task_id(q)
+    if task_id is not None:
+        await _send_task_details(message, s, staff, task_id)
+        return
     rows = await stats.search(s, q)
-    if not rows:
+    found = await tasks.search(s, staff, q)
+    if not rows and not found:
         await message.answer("Ничего не найдено.")
         return
-    lines = [stats.search_line(t, c, name) for t, c, name in rows]
-    await message.answer("\n".join(lines) + "\n\nПодробнее: /find <номер>")
+    parts = []
+    if rows:
+        lines = [stats.search_line(t, c, name) for t, c, name in rows]
+        parts.append("\n".join(lines) + "\n\nПодробнее: /find <номер>")
+    if found:
+        names = await queries.staff_names(s)
+        lines = [task_render.search_line(t, names) for t in found]
+        parts.append("Задачи:\n" + "\n".join(lines) + "\n\nПодробнее: /find З-<номер>")
+    await message.answer("\n\n".join(parts)[:4000])
 
 
 @router.callback_query(F.data.regexp(_ID_DATA.format("chat")), IsActive())
@@ -281,8 +337,11 @@ async def cmd_stats(message: Message):
 async def cb_stats(cq: CallbackQuery, s):
     kind = cq.data.split(":", 1)[1]
     start, end = stats.period_bounds(kind, clock.utcnow())
-    result = await stats.compute(s, start, end)
-    await cq.message.answer(stats.render_stats(result, stats.PERIOD_TITLES[kind]))
+    text = stats.render_stats(await stats.compute(s, start, end), stats.PERIOD_TITLES[kind])
+    ts = await stats.compute_tasks(s, start, end, tasks.today())
+    if ts.created or ts.closed or ts.overdue_now:
+        text += "\n\n" + stats.render_task_stats(ts)
+    await cq.message.answer(text[:4096])
     await cq.answer()
 
 
@@ -382,8 +441,40 @@ async def cb_staff_action(cq: CallbackQuery, s, staff: Staff):
 # ---------- ответы пользователю ----------
 
 
+async def _comment_task(message: Message, s, staff: Staff, bot: Bot, settings: Settings, t) -> None:
+    n = task_render.number(t)
+    if not task_rules.can_see(staff, t):
+        await message.answer("Задача недоступна.")
+        return
+    if t.status == "closed":
+        await message.answer(f"{n} уже закрыта — комментарий не отправлен.")
+        return
+    try:
+        content = await extract_content(bot, message, settings.files_dir)
+    except FileTooBig:
+        await message.answer("Файл больше 20 МБ — бот не может его скачать. Отправьте ссылкой.")
+        return
+    await tasks.comment(
+        s,
+        t,
+        staff,
+        kind=content.kind,
+        text=content.text,
+        file_path=content.file_path,
+        file_name=content.file_name,
+    )
+    await tasks.link(s, staff.tg_chat_id, message.message_id, t.id)
+    await message.answer(f"💬 → {n} ✓")
+
+
 async def _reply_to_client(message: Message, s, staff: Staff, bot: Bot, settings: Settings):
     reply_to = message.reply_to_message.message_id if message.reply_to_message else None
+    if reply_to is not None:
+        # сначала задачи: ответ на карточку задачи никогда не уходит в WhatsApp
+        task = await tasks.task_for_reply(s, staff.tg_chat_id, reply_to)
+        if task is not None:
+            await _comment_task(message, s, staff, bot, settings, task)
+            return
     t, err = await tickets.resolve_target(s, staff, reply_to)
     if t is None:
         await message.answer(err)
