@@ -1,14 +1,15 @@
 from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from helpdesk import clock
 from helpdesk.db import queries
-from helpdesk.db.models import Staff, Task, TaskEvent
+from helpdesk.db.models import Staff, Task, TaskComment, TaskEvent, TaskLink
 from helpdesk.delivery import outbox
 from helpdesk.delivery.outbox import Buttons
 from helpdesk.tasks import render, rules
+from helpdesk.tickets.service import TG_FILE_KIND
 
 
 class NoCoordinator(Exception):
@@ -207,3 +208,112 @@ async def close(s, task_id: int, staff: Staff) -> bool:
     text = f"✅ {render.number(t)} закрыта ({staff.name})"
     notify(s, t, await rules.participants(s, t), text, skip_id=staff.id)
     return True
+
+
+async def comment(
+    s,
+    t: Task,
+    staff: Staff,
+    *,
+    kind: str,
+    text: str | None,
+    file_path: str | None = None,
+    file_name: str | None = None,
+) -> TaskComment | None:
+    if t.status == "closed":
+        return None
+    c = TaskComment(
+        task_id=t.id,
+        staff_id=staff.id,
+        kind=kind,
+        text=text,
+        file_path=file_path,
+        file_name=file_name,
+    )
+    s.add(c)
+    head = f"💬 {render.number(t)} · {staff.name}"
+    body = f"{head}: {text}" if text else head
+    for st in await rules.participants(s, t):
+        if st.id == staff.id:
+            continue
+        if file_path:
+            outbox.tg_send(
+                s,
+                st.tg_chat_id,
+                text=body,
+                file_path=file_path,
+                file_kind=TG_FILE_KIND[kind],
+                task_id=t.id,
+            )
+        else:
+            outbox.tg_send(s, st.tg_chat_id, text=body, task_id=t.id)
+    await s.flush()
+    return c
+
+
+async def task_for_reply(s, chat_id: int, message_id: int) -> Task | None:
+    link_ = await s.get(TaskLink, (chat_id, message_id))
+    return await s.get(Task, link_.task_id) if link_ else None
+
+
+async def link(s, chat_id: int, message_id: int, task_id: int) -> None:
+    await s.merge(TaskLink(tg_chat_id=chat_id, tg_message_id=message_id, task_id=task_id))
+
+
+_BY_DUE = (Task.due_date.asc().nulls_last(), Task.id)
+
+
+async def my_tasks(s, staff: Staff) -> list[Task]:
+    q = (
+        select(Task)
+        .where(Task.status == "in_progress", Task.assignee_id == staff.id)
+        .order_by(*_BY_DUE)
+    )
+    return list((await s.scalars(q)).all())
+
+
+async def queued_for(s, staff: Staff) -> list[Task]:
+    q = select(Task).where(Task.status == "queued").order_by(*_BY_DUE)
+    return [t for t in (await s.scalars(q)).all() if rules.can_do(staff, t.kind)]
+
+
+async def deliver_queue_to(s, staff: Staff) -> int:
+    rows = await queued_for(s, staff)
+    names = await queries.staff_names(s)
+    for t in rows:
+        await _send_card(s, t, staff, names, header="🆘 Задаче нужен исполнитель", with_file=False)
+    return len(rows)
+
+
+async def open_tasks(s, staff: Staff) -> list[Task]:
+    q = select(Task).where(Task.status != "closed", rules.visible_cond(staff)).order_by(Task.id)
+    return list((await s.scalars(q)).all())
+
+
+async def search(s, staff: Staff, q: str, limit: int = 10) -> list[Task]:
+    like = f"%{q.strip()}%"
+    query = (
+        select(Task)
+        .where(
+            or_(Task.description.ilike(like), Task.requester.ilike(like)),
+            rules.visible_cond(staff),
+        )
+        .order_by(Task.id.desc())
+        .limit(limit)
+    )
+    return list((await s.scalars(query)).all())
+
+
+async def get_visible(s, staff: Staff, task_id: int) -> Task | None:
+    t = await s.get(Task, task_id)
+    return t if t is not None and rules.can_see(staff, t) else None
+
+
+async def recent_comments(s, task_id: int, limit: int = 5) -> list[TaskComment]:
+    q = (
+        select(TaskComment)
+        .where(TaskComment.task_id == task_id)
+        .order_by(TaskComment.id.desc())
+        .limit(limit)
+    )
+    return list(reversed((await s.scalars(q)).all()))
