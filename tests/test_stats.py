@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 
 from openpyxl import load_workbook
@@ -7,7 +7,7 @@ from helpdesk import clock
 from helpdesk.db.models import Message, TicketEvent
 from helpdesk.stats import export
 from helpdesk.stats import service as stats
-from tests.factories import make_client, make_staff, make_ticket
+from tests.factories import make_client, make_staff, make_task, make_ticket
 
 
 def L(*args):  # локальное время Алматы
@@ -173,3 +173,64 @@ async def test_export_xlsx_neutralizes_formulas_and_control_chars(s, clock_):
     assert row[5] == "'=1+1" and row[2] == "'=cmd" and row[3] == "'@x"
     cell = ws.cell(row=2, column=6)
     assert cell.data_type != "f"
+
+
+async def _tasks_dataset(s, now):
+    erlan = await make_staff(s, tg_id=1, name="Ерлан")
+    coord = await make_staff(s, tg_id=3, name="Айжан", role="coordinator")
+    on_time = await make_task(s, erlan, status="closed", due_date=date(2026, 10, 7))
+    on_time.closed_at, on_time.closed_by_id = now, erlan.id
+    late = await make_task(
+        s,
+        erlan,
+        kind="coordinator",
+        assignee=coord,
+        status="closed",
+        due_date=date(2026, 10, 6),
+        description="=SUM(A1)",
+    )
+    late.closed_at, late.closed_by_id = now, coord.id
+    overdue = await make_task(s, erlan, due_date=date(2026, 10, 5), requester="каб. 1")
+    old = await make_task(s, erlan)
+    old.created_at = now - timedelta(days=40)
+    await s.flush()
+    return on_time, late, overdue, old
+
+
+async def test_compute_tasks(s, clock_):
+    await _tasks_dataset(s, clock_.now)
+    start, end = stats.period_bounds("today", clock_.now)
+    ts = await stats.compute_tasks(s, start, end, date(2026, 10, 7))
+    assert (ts.created, ts.closed, ts.overdue_now, ts.closed_late) == (3, 2, 1, 1)
+    assert ts.by_kind == {"helpdesk": (2, 1), "coordinator": (1, 1)}
+    assert ts.per_staff == [("Айжан", 1), ("Ерлан", 1)]
+    text = stats.render_task_stats(ts)
+    assert text.splitlines()[:3] == [
+        "📌 Задачи",
+        "Создано: 3 · Закрыто: 2 (с опозданием: 1)",
+        "Просрочено сейчас: 1",
+    ]
+    assert "• 🧭 Координатор — создано 1, закрыто 1" in text
+
+
+async def test_export_has_tasks_sheet(s, clock_):
+    on_time, late, overdue, old = await _tasks_dataset(s, clock_.now)
+    data = await export.export_xlsx(s, *stats.period_bounds("today", clock_.now))
+    ws = load_workbook(BytesIO(data))["Задачи"]
+    rows = list(ws.iter_rows(values_only=True))
+    assert list(rows[0]) == export.TASK_HEADERS
+    assert [r[0] for r in rows[1:]] == [f"З-{on_time.id}", f"З-{late.id}", f"З-{overdue.id}"]
+    assert list(rows[2]) == [
+        f"З-{late.id}",
+        "Координатор",
+        "закрыта",
+        "'=SUM(A1)",
+        None,
+        "Ерлан",
+        "Айжан",
+        datetime(2026, 10, 6),
+        datetime(2026, 10, 7, 14, 0),
+        datetime(2026, 10, 7, 14, 0),
+        "да",
+    ]
+    assert rows[1][-1] == "нет" and rows[3][-1] == "да" and rows[3][4] == "каб. 1"

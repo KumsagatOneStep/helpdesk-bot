@@ -1,11 +1,14 @@
+from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, or_, select
 
 from helpdesk import clock
 from helpdesk.db import queries
-from helpdesk.db.models import Client, Ticket, TicketEvent
+from helpdesk.db.models import Client, Task, Ticket, TicketEvent
+from helpdesk.tasks.render import KIND_RU
+from helpdesk.tasks.rules import KINDS
 from helpdesk.tickets import render
 from helpdesk.tickets.service import TG_FILE_KIND, ticket_messages
 
@@ -146,6 +149,60 @@ async def compute(s, start, end) -> Stats:
         per_staff=per_staff,
         top_locations=top,
     )
+
+
+@dataclass
+class TaskStats:
+    created: int
+    closed: int
+    overdue_now: int
+    closed_late: int
+    by_kind: dict[str, tuple[int, int]]
+    per_staff: list[tuple[str, int]]
+
+
+async def compute_tasks(s, start, end, today: date) -> TaskStats:
+    cq = (
+        select(Task.kind, func.count())
+        .where(*between(Task.created_at, start, end))
+        .group_by(Task.kind)
+    )
+    created = dict((await s.execute(cq)).all())
+    closed = list(
+        (
+            await s.scalars(
+                select(Task).where(Task.status == "closed", *between(Task.closed_at, start, end))
+            )
+        ).all()
+    )
+    overdue = await s.scalar(
+        select(func.count()).select_from(Task).where(Task.status != "closed", Task.due_date < today)
+    )
+    closed_kind = Counter(t.kind for t in closed)
+    by_kind = {
+        k: (created.get(k, 0), closed_kind.get(k, 0))
+        for k in KINDS
+        if created.get(k) or closed_kind.get(k)
+    }
+    late = sum(1 for t in closed if t.due_date and clock.local(t.closed_at).date() > t.due_date)
+    names = await queries.staff_names(s)
+    per = Counter(t.closed_by_id for t in closed)
+    per_staff = sorted(
+        ((names.get(i, "?"), n) for i, n in per.items()), key=lambda x: (-x[1], x[0])
+    )
+    return TaskStats(sum(created.values()), len(closed), overdue, late, by_kind, per_staff)
+
+
+def render_task_stats(ts: TaskStats) -> str:
+    lines = [
+        "📌 Задачи",
+        f"Создано: {ts.created} · Закрыто: {ts.closed} (с опозданием: {ts.closed_late})",
+        f"Просрочено сейчас: {ts.overdue_now}",
+    ]
+    lines += [f"• {KIND_RU[k]} — создано {c}, закрыто {cl}" for k, (c, cl) in ts.by_kind.items()]
+    if ts.per_staff:
+        lines += ["Закрыли:"] + [f"• {name} — {n}" for name, n in ts.per_staff]
+    return "\n".join(lines)
 
 
 def fmt_min(x: float | None) -> str:
