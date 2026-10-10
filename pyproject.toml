@@ -12,6 +12,7 @@ dependencies = [
   "openpyxl>=3.1",
   "structlog>=24.4",
   "tzdata>=2024.2",
+  "faster-whisper>=1.2.1",
 ]
 
 [dependency-groups]

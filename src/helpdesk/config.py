@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     remind_after_min: int = 10
     task_remind_hour: int = 9
     files_dir: str = "/data/files"
+    stt_enabled: bool = True
+    stt_model: str = "small"
+    stt_max_seconds: int = 120
 
     @property
     def admin_ids(self) -> set[int]:

@@ -75,3 +75,16 @@ class FakeGreen:
         if self.fail_download:
             raise RuntimeError("link expired")
         Path(dest).write_bytes(b"img")
+
+
+class FakeTranscriber:
+    def __init__(self, text=None, loaded=True, enabled=True):
+        self.text = text
+        self.is_loaded = loaded
+        self.enabled = enabled
+        self.calls: list[str] = []
+
+    async def transcribe(self, path):
+        self.calls.append(path)
+        self.is_loaded = True
+        return self.text

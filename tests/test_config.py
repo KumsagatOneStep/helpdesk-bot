@@ -17,6 +17,7 @@ def test_admin_ids_parsed_and_media_url_defaults():
     assert s.media_url == "https://api.green-api.com"
     assert s.remind_after_min == 10
     assert s.task_remind_hour == 9
+    assert (s.stt_enabled, s.stt_model, s.stt_max_seconds) == (True, "small", 120)
 
 
 def test_media_url_override():
