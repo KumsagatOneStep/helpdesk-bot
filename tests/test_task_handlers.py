@@ -274,12 +274,21 @@ async def test_voice_description_confirm_and_create(s, clock_, state, tmp_path):
     assert await state.get_state() == TaskForm.requester.state
     data = await state.get_data()
     assert data["description"] == "Заменить картридж"
-    assert data["file_kind"] == "voice" and data["file_name"] == "voice.ogg"
+    assert "file_path" not in data  # голосовое не прикрепляется — только текст
+    assert list(tmp_path.rglob("*.ogg")) == []  # скачанный файл удалён
     await state.update_data(requester=None, due=None)
     await state.set_state(TaskForm.confirm)
     await task_handlers.confirm_create(Cq("tkn_ok"), state, s, erlan)
     t = await s.scalar(select(Task))
-    assert (t.description, t.file_kind) == ("Заменить картридж", "voice")
+    assert (t.description, t.file_kind, t.file_path) == ("Заменить картридж", None, None)
+
+
+async def test_failed_voice_file_removed(state, tmp_path, clock_):
+    await state.set_state(TaskForm.description)
+    await task_handlers.got_voice(
+        _VoiceMsg(), state, _DlBot(), _vs(tmp_path), FakeTranscriber(None)
+    )
+    assert list(tmp_path.rglob("*.ogg")) == []
 
 
 async def test_voice_edit_goes_back(state, tmp_path, clock_):

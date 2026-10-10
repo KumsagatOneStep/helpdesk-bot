@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
@@ -155,6 +156,9 @@ async def got_voice(message: Message, state: FSMContext, bot, settings: Settings
     except FileTooBig:
         await message.answer("Файл больше 20 МБ — бот не может его скачать.")
         return
+    if r.content is not None:
+        # в задачу идёт только текст — голосовое после распознавания не нужно
+        Path(r.content.file_path).unlink(missing_ok=True)
     await state.set_state(TaskForm.description)
     if r.status == "disabled":
         await message.answer("Распознавание выключено — напишите текстом.")
@@ -167,10 +171,6 @@ async def got_voice(message: Message, state: FSMContext, bot, settings: Settings
     if r.status == "failed":
         await r.progress.edit_text("Не удалось распознать — напишите текстом или запишите ещё раз.")
         return
-    if not (await state.get_data()).get("file_path"):
-        await state.update_data(
-            file_path=r.content.file_path, file_name=r.content.file_name, file_kind="voice"
-        )
     text, note = r.text, ""
     if len(text) > render.MAX_DESCRIPTION:
         text = text[: render.MAX_DESCRIPTION]
