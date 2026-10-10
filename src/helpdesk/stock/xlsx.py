@@ -30,7 +30,7 @@ def _int(v) -> int | None:
         return v
     if isinstance(v, float) and v.is_integer():
         return int(v)
-    if isinstance(v, str) and v.strip().isdigit():
+    if isinstance(v, str) and v.strip().isdecimal():
         return int(v.strip())
     return None
 

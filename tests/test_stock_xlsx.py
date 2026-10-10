@@ -68,6 +68,11 @@ def test_parse_formula_cell_is_not_evaluated():
     assert rows == [] and errors == ["строка 2: количество «» — нужно целое от 0 до 100000"]
 
 
+def test_parse_superscript_digit_is_an_error_not_a_crash():
+    _, errors = stock_xlsx.parse(_book([["Мыши", "Мышь", "новые", "²", None]]))
+    assert errors == ["строка 2: количество «²» — нужно целое от 0 до 100000"]
+
+
 def test_parse_limits():
     with pytest.raises(stock_xlsx.BadFile, match="Больше 1000 строк"):
         stock_xlsx.parse(_book([["Мыши", f"М{i}", "новые", 1, None] for i in range(1001)]))
