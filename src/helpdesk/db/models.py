@@ -1,6 +1,16 @@
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -182,3 +192,42 @@ class TaskLink(Base):
     tg_chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     tg_message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+
+
+class StockItem(Base):
+    __tablename__ = "stock_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(24))
+    name: Mapped[str] = mapped_column(String(200))
+    min_qty: Mapped[int | None]
+    archived: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+
+
+# одно активное имя на категорию без учёта регистра; в архиве дубли допустимы
+Index(
+    "uq_stock_items_active_name",
+    StockItem.category,
+    func.lower(StockItem.name),
+    unique=True,
+    postgresql_where=StockItem.archived.is_(False),
+)
+
+
+class StockLevel(Base):
+    __tablename__ = "stock_levels"
+    __table_args__ = (CheckConstraint("qty >= 0", name="ck_stock_levels_qty"),)
+    item_id: Mapped[int] = mapped_column(ForeignKey("stock_items.id"), primary_key=True)
+    condition: Mapped[str] = mapped_column(String(16), primary_key=True)
+    qty: Mapped[int] = mapped_column(default=0)
+
+
+class StockMove(Base):
+    __tablename__ = "stock_moves"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("stock_items.id"), index=True)
+    condition: Mapped[str] = mapped_column(String(16))
+    delta: Mapped[int]
+    kind: Mapped[str] = mapped_column(String(8))  # in | out | fix | import
+    staff_id: Mapped[int] = mapped_column(ForeignKey("staff.id"))
+    created_at: Mapped[datetime] = mapped_column(default=_now, index=True)
