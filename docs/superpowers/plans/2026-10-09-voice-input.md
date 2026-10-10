@@ -28,6 +28,8 @@
 3. **Голосовое длиннее лимита не скачивается в диалоге**, но в комментарии файл скачивается и уходит без расшифровки. Тесты в задаче 2.
 4. **Голос после фото не затирает вложение-фото.** Тест в задаче 3 (`test_voice_keeps_existing_photo_attachment`).
 5. **Голосовой комментарий не уходит в WhatsApp**, даже когда у специалиста есть активная заявка. Тест в задаче 4.
+6. **Длинная расшифровка не обрезается молча.** Подпись к файлу в Telegram — максимум 1024 символа (`gateway.send` режет `text[:1024]`). Если подпись комментария длиннее, файл уходит с короткой подписью-заголовком, а полный текст — отдельным сообщением следом. Тест в задаче 4 (`test_long_caption_split_into_file_and_text`).
+7. **Задачу закрыли, пока шло распознавание** (до минуты) — комментарий не добавляется. После распознавания задача перечитывается из БД. Тест в задаче 4 (`test_task_closed_during_recognition_no_comment`).
 
 ---
 
@@ -701,6 +703,20 @@ async def test_voice_comment_caption(s, clock_):
                         file_name="voice.ogg", voice=True)
     [p] = await payloads(s, "tg")
     assert p["text"] == f"💬 З-{t.id} · Ерлан (🎤)"
+
+
+async def test_long_caption_split_into_file_and_text(s, clock_):
+    erlan = await make_staff(s, tg_id=1, name="Ерлан")
+    await make_staff(s, tg_id=2, name="Тимур")
+    t = await make_task(s, erlan)
+    long = "я" * 1500
+    await tasks.comment(s, t, erlan, kind="audio", text=long, file_path="/f/v.ogg",
+                        file_name="voice.ogg", voice=True)
+    head = f"💬 З-{t.id} · Ерлан (🎤)"
+    assert [(p["file_kind"], p["text"]) for p in await payloads(s, "tg")] == [
+        ("voice", head),
+        (None, f"{head}: {long}"),
+    ]
 ```
 
 В `tests/test_telegram.py` — импорты в начало: `from tests.fakes import FakeTranscriber`. В конец файла:
@@ -759,7 +775,36 @@ async def test_voice_comment_too_long_sent_as_audio(s, clock_, tmp_path):
     assert stt.calls == [] and msg.answers == [f"💬 → З-{task.id} ✓"]
     [cm] = (await s.scalars(select(TaskComment))).all()
     assert (cm.kind, cm.text) == ("audio", None)
+
+
+class _ClosingTranscriber(FakeTranscriber):
+    """Пока «распознаём», задачу закрывают другим запросом."""
+
+    def __init__(self, s, task_id):
+        super().__init__("Заменил")
+        self.s, self.task_id = s, task_id
+
+    async def transcribe(self, path):
+        await self.s.execute(update(Task).where(Task.id == self.task_id).values(status="closed"))
+        return await super().transcribe(path)
+
+
+async def test_task_closed_during_recognition_no_comment(s, clock_, tmp_path):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    await make_staff(s, tg_id=7, name="Тимур")
+    task = await make_task(s, erlan)
+    await tasks_svc.link(s, 6, 3333, task.id)
+    await s.flush()
+    msg = _VoiceChatMessage(6, reply_to_message=SimpleNamespace(message_id=3333))
+    settings = SimpleNamespace(files_dir=str(tmp_path), stt_max_seconds=120)
+    await handlers._reply_to_client(msg, s, erlan, FakeBot(), settings,
+                                    _ClosingTranscriber(s, task.id))
+    assert msg.edits == [f"З-{task.id} уже закрыта — комментарий не отправлен."]
+    assert (await s.scalars(select(TaskComment))).all() == []
+    assert (await s.scalars(select(Outbox))).all() == []
 ```
+
+(`update` из `sqlalchemy` и `Task` из `helpdesk.db.models` — добавить в импорты, если их нет; путь модели сверить с остальными импортами файла.)
 
 (`FakeBot`, `FakeChatMessage`, `_Sent`, `make_*` уже есть в `test_telegram.py`. `FakeBot.download` пишет файл.)
 
@@ -770,10 +815,27 @@ Expected: FAIL (`TypeError: comment() got an unexpected keyword argument 'voice'
 
 - [ ] **Step 3: `tasks.service.comment`**
 
-Новый параметр `voice: bool = False` в конце сигнатуры; строка заголовка:
+Новый параметр `voice: bool = False` в конце сигнатуры; константа модуля `MAX_CAPTION = 1024` (лимит подписи Telegram) и рассылка:
 
 ```python
     head = f"💬 {render.number(t)} · {staff.name}{' (🎤)' if voice else ''}"
+    body = f"{head}: {text}" if text else head
+    # подпись к файлу Telegram режет на 1024 — длинный текст отдельным сообщением
+    split = bool(file_path) and len(body) > MAX_CAPTION
+    for st in await rules.participants(s, t):
+        if st.id == staff.id:
+            continue
+        if file_path:
+            outbox.tg_send(
+                s,
+                st.tg_chat_id,
+                text=head if split else body,
+                file_path=file_path,
+                file_kind=TG_FILE_KIND[kind],
+                task_id=t.id,
+            )
+        if split or not file_path:
+            outbox.tg_send(s, st.tg_chat_id, text=body, task_id=t.id)
 ```
 
 - [ ] **Step 4: `handlers.py`**
@@ -806,7 +868,9 @@ async def _comment_task(
     except FileTooBig:
         await message.answer("Файл больше 20 МБ — бот не может его скачать. Отправьте ссылкой.")
         return
-    await tasks.comment(
+    # распознавание идёт до минуты — задачу могли закрыть, перечитываем
+    await s.refresh(t)
+    c = await tasks.comment(
         s,
         t,
         staff,
@@ -816,8 +880,11 @@ async def _comment_task(
         file_name=content.file_name,
         voice=is_voice,
     )
-    await tasks.link(s, staff.tg_chat_id, message.message_id, t.id)
-    reply = f"💬 → {n} ✓" + (f"\n🎤 {text}" if is_voice and text else "")
+    if c is None:
+        reply = f"{n} уже закрыта — комментарий не отправлен."
+    else:
+        await tasks.link(s, staff.tg_chat_id, message.message_id, t.id)
+        reply = f"💬 → {n} ✓" + (f"\n🎤 {text}" if is_voice and text else "")
     if progress is not None:
         await progress.edit_text(reply)
     else:
