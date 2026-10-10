@@ -2,7 +2,6 @@ from datetime import date, datetime
 from io import BytesIO
 
 from openpyxl import Workbook
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import distinct_on
 
@@ -12,6 +11,7 @@ from helpdesk.db.models import Client, Message, Task, Ticket
 from helpdesk.stats.service import STATUS_RU, between
 from helpdesk.tasks.render import KIND_PLAIN
 from helpdesk.tasks.render import STATUS_RU as TASK_STATUS_RU
+from helpdesk.xlsx_util import layout, naive, safe
 
 HEADERS = [
     "№",
@@ -44,17 +44,6 @@ TASK_HEADERS = [
 TASK_WIDTHS = [8, 14, 16, 50, 24, 16, 16, 11, 17, 17, 13]
 
 
-def _safe(v: str | None) -> str | None:
-    if v is None:
-        return None
-    v = ILLEGAL_CHARACTERS_RE.sub("", v)
-    return "'" + v if v[:1] in ("=", "+", "-", "@") else v
-
-
-def _naive(dt: datetime | None) -> datetime | None:
-    return clock.local(dt).replace(tzinfo=None) if dt else None
-
-
 def _minutes(a: datetime | None, b: datetime) -> int | None:
     return round((a - b).total_seconds() / 60) if a else None
 
@@ -64,17 +53,6 @@ def _late(t: Task, today: date) -> str | None:
         return None
     day = clock.local(t.closed_at).date() if t.closed_at else today
     return "да" if day > t.due_date else "нет"
-
-
-def _layout(ws, widths: list[int]) -> None:
-    for i, width in enumerate(widths):
-        ws.column_dimensions[chr(ord("A") + i)].width = width
-    for row in ws.iter_rows(min_row=2):
-        for cell in row:
-            if isinstance(cell.value, datetime):
-                cell.number_format = "DD.MM.YYYY HH:MM"
-            elif isinstance(cell.value, date):
-                cell.number_format = "DD.MM.YYYY"
 
 
 async def export_xlsx(s, start, end) -> bytes:
@@ -105,20 +83,20 @@ async def export_xlsx(s, start, end) -> bytes:
         ws.append(
             [
                 t.id,
-                _naive(t.created_at),
-                _safe(c.full_name or c.wa_name),
-                _safe(c.location),
+                naive(t.created_at),
+                safe(c.full_name or c.wa_name),
+                safe(c.location),
                 "+" + c.phone,
-                _safe(first.get(t.id)),
+                safe(first.get(t.id)),
                 names.get(t.assignee_id or t.closed_by_id),
                 STATUS_RU[t.status],
-                _naive(t.first_taken_at),
-                _naive(t.closed_at),
+                naive(t.first_taken_at),
+                naive(t.closed_at),
                 _minutes(t.first_taken_at, t.created_at),
                 _minutes(t.closed_at, t.created_at),
             ]
         )
-    _layout(ws, WIDTHS)
+    layout(ws, WIDTHS)
 
     tq = select(Task).where(*between(Task.created_at, start, end)).order_by(Task.id)
     today = clock.local(clock.utcnow()).date()
@@ -130,17 +108,17 @@ async def export_xlsx(s, start, end) -> bytes:
                 f"З-{t.id}",
                 KIND_PLAIN[t.kind],
                 TASK_STATUS_RU[t.status],
-                _safe(t.description),
-                _safe(t.requester),
+                safe(t.description),
+                safe(t.requester),
                 names.get(t.creator_id),
                 names.get(t.assignee_id or t.closed_by_id),
                 t.due_date,
-                _naive(t.created_at),
-                _naive(t.closed_at),
+                naive(t.created_at),
+                naive(t.closed_at),
                 _late(t, today),
             ]
         )
-    _layout(ws2, TASK_WIDTHS)
+    layout(ws2, TASK_WIDTHS)
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()

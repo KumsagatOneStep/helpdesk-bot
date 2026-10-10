@@ -207,6 +207,52 @@ async def archive(s, staff: Staff, item_id: int) -> StockItem:
 
 
 @dataclass
+class ImportRow:
+    line: int
+    category: str
+    name: str
+    condition: str
+    qty: int
+    min_qty: int | None
+
+
+def _key(category: str, name: str) -> tuple[str, str]:
+    return category, clean_name(name).lower()
+
+
+async def preview_import(s, rows: list[ImportRow]) -> tuple[int, int]:
+    """(новых позиций, строк по уже существующим) — ничего не пишет."""
+    known: dict[tuple[str, str], bool] = {}
+    existing_rows = 0
+    for r in rows:
+        k = _key(r.category, r.name)
+        if k not in known:
+            known[k] = await find_active(s, r.category, r.name) is not None
+        existing_rows += known[k]
+    return sum(1 for exists in known.values() if not exists), existing_rows
+
+
+async def apply_import(s, staff: Staff, rows: list[ImportRow]) -> tuple[int, int]:
+    """(создано позиций, строк с приходом). Количество прибавляется к остатку."""
+    _need_coordinator(staff)
+    items: dict[tuple[str, str], StockItem] = {}
+    created = received = 0
+    for r in rows:
+        k = _key(r.category, r.name)
+        item = items.get(k) or await find_active(s, r.category, r.name)
+        if item is None:
+            item = await create_item(s, staff, r.category, r.name, r.min_qty)
+            created += 1
+        elif r.min_qty is not None:
+            await set_min(s, staff, item.id, r.min_qty)
+        items[k] = item
+        if r.qty > 0:
+            await receive(s, staff, item.id, r.condition, r.qty, kind="import")
+            received += 1
+    return created, received
+
+
+@dataclass
 class ItemRow:
     item: StockItem
     levels: dict[str, int]
