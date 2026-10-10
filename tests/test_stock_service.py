@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from helpdesk.db.models import Staff, StockMove
 from helpdesk.stock import service as stock
-from tests.factories import make_staff
+from tests.factories import clear_outbox, make_staff, payloads
 
 
 async def _people(s):
@@ -93,3 +93,99 @@ async def test_two_takes_of_last_unit(sf, clock_):
     assert sorted(r.ok for r in results) == [False, True]
     async with sf() as s:
         assert (await stock.levels(s, item_id))["new"] == 0
+
+
+async def test_set_level_writes_difference(s, clock_):
+    coord, _ = await _people(s)
+    item = await stock.create_item(s, coord, "batteries", "AA")
+    await stock.receive(s, coord, item.id, "new", 10)
+    await stock.set_level(s, coord, item.id, "new", 7)
+    await stock.set_level(s, coord, item.id, "new", 7)  # без изменений — без записи
+    await stock.set_level(s, coord, item.id, "used", 2)
+    moves = (await s.scalars(select(StockMove).order_by(StockMove.id))).all()
+    assert [(m.kind, m.condition, m.delta) for m in moves] == [
+        ("in", "new", 10),
+        ("fix", "new", -3),
+        ("fix", "used", 2),
+    ]
+    assert await stock.levels(s, item.id) == {"new": 7, "used": 2, "repaired": 0}
+
+
+async def test_low_stock_alert_once_per_crossing(s, clock_):
+    coord, erlan = await _people(s)
+    coord2 = await make_staff(s, tg_id=4, name="Данияр", role="coordinator")
+    item = await stock.create_item(s, coord, "cartridges", "HP 85A", min_qty=3)
+    await stock.receive(s, coord, item.id, "new", 5)
+    await stock.take(s, erlan, item.id, "new", 1)  # 4 — выше минимума
+    assert await payloads(s, "tg") == []
+    await stock.take(s, erlan, item.id, "new", 2)  # 2 — пересечение
+    ps = await payloads(s, "tg")
+    assert sorted(p["chat_id"] for p in ps) == [coord.tg_chat_id, coord2.tg_chat_id]
+    assert {p["text"] for p in ps} == {"⚠️ HP 85A: осталось 2 (минимум 3)"}
+    await clear_outbox(s)
+    await stock.take(s, erlan, item.id, "new", 1)  # уже ниже — молчим
+    assert await payloads(s, "tg") == []
+    await stock.receive(s, coord, item.id, "new", 5)  # 6
+    await stock.set_level(s, coord, item.id, "new", 3)  # ровно минимум — пересечение
+    assert [p["text"] for p in await payloads(s, "tg")] == ["⚠️ HP 85A: осталось 3 (минимум 3)"] * 2
+    assert await payloads(s, "wa") == []
+
+
+async def test_low_stock_without_coordinators_or_min(s, clock_):
+    coord, erlan = await _people(s)
+    item = await stock.create_item(s, coord, "mice", "Мышь", min_qty=1)
+    plain = await stock.create_item(s, coord, "mice", "Мышь б/п")
+    await stock.receive(s, coord, item.id, "new", 2)
+    await stock.receive(s, coord, plain.id, "new", 1)
+    coord.role = "helpdesk"
+    await s.flush()
+    await stock.take(s, erlan, item.id, "new", 2)
+    await stock.take(s, erlan, plain.id, "new", 1)
+    assert await payloads(s, "tg") == []
+
+
+async def test_archive_and_min(s, clock_):
+    coord, erlan = await _people(s)
+    item = await stock.create_item(s, coord, "mice", "Мышь")
+    await stock.set_min(s, coord, item.id, 2)
+    assert (await stock.get_item(s, item.id)).min_qty == 2
+    await stock.set_min(s, coord, item.id, None)
+    assert (await stock.get_item(s, item.id)).min_qty is None
+    with pytest.raises(stock.NotCoordinator):
+        await stock.archive(s, erlan, item.id)
+    await stock.archive(s, coord, item.id)
+    for call in (
+        stock.take(s, erlan, item.id, "new", 1),
+        stock.receive(s, coord, item.id, "new", 1),
+        stock.set_level(s, coord, item.id, "new", 1),
+        stock.set_min(s, coord, item.id, 1),
+    ):
+        with pytest.raises(stock.Archived):
+            await call
+    again = await stock.create_item(s, coord, "mice", "Мышь")  # имя освободилось
+    assert again.id != item.id
+
+
+async def test_totals_pages_and_search(s, clock_):
+    coord, _ = await _people(s)
+    for i in range(12):
+        it = await stock.create_item(s, coord, "cables", f"Кабель {i:02d}")
+        await stock.receive(s, coord, it.id, "new", 1)
+    hdmi = await stock.create_item(s, coord, "cables", "HDMI 2м", min_qty=5)
+    await stock.receive(s, coord, hdmi.id, "used", 3)
+    gone = await stock.create_item(s, coord, "cables", "HDMI старый")
+    await stock.receive(s, coord, gone.id, "new", 100)
+    await stock.archive(s, coord, gone.id)
+    totals = await stock.category_totals(s)
+    assert totals["cables"] == 15 and totals["mice"] == 0 and len(totals) == 13
+    rows, page, pages = await stock.items_in(s, "cables", 0)
+    assert (len(rows), page, pages) == (10, 0, 2)
+    assert rows[0].item.name == "HDMI 2м" and rows[0].low and rows[0].total == 3
+    rows, page, _ = await stock.items_in(s, "cables", 99)  # за краем — последняя
+    assert (len(rows), page) == (3, 1)
+    rows, page, pages = await stock.items_in(s, "mice", 0)
+    assert (rows, page, pages) == ([], 0, 1)
+    found = await stock.search(s, "hdmi")
+    assert [r.item.name for r in found] == ["HDMI 2м"]
+    assert await stock.search(s, "%") == []  # спецсимволы LIKE экранируются
+    assert len(await stock.search(s, "кабель")) == 12

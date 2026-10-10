@@ -1,16 +1,20 @@
 from dataclasses import dataclass
+from math import ceil
 
 import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from helpdesk.db.models import Staff, StockItem, StockLevel, StockMove
+from helpdesk.delivery import outbox
 from helpdesk.stock.catalog import CATEGORIES, CONDITIONS
+from helpdesk.tasks import rules
 
 log = structlog.get_logger()
 
 MAX_IN = 1000  # приход кнопкой
 MAX_LEVEL = 100_000  # исправление, минимум, количество в xlsx
+PER_PAGE = 10
 
 
 class StockError(Exception):
@@ -136,7 +140,17 @@ async def _add(s, staff: Staff, item: StockItem, condition: str, delta: int, kin
 
 
 async def _notify_low(s, item: StockItem, before: int, after: int) -> None:
-    """Порог минимума — задача 2."""
+    """Одно предупреждение при пересечении минимума сверху вниз."""
+    m = item.min_qty
+    if m is None or not before > m >= after:
+        return
+    coords = await rules.coordinators(s)
+    if not coords:
+        log.warning("stock low, no coordinators", item_id=item.id)
+        return
+    for c in coords:
+        outbox.tg_send(s, c.tg_chat_id, text=f"⚠️ {item.name}: осталось {after} (минимум {m})")
+    await s.flush()
 
 
 async def receive(s, staff: Staff, item_id: int, condition: str, qty: int, *, kind="in") -> int:
@@ -159,3 +173,106 @@ async def take(s, staff: Staff, item_id: int, condition: str, qty: int) -> TakeR
     await _add(s, staff, item, condition, -qty, "out")
     await _notify_low(s, item, before, before - qty)
     return TakeResult(True, available - qty, available)
+
+
+async def set_level(s, staff: Staff, item_id: int, condition: str, new_qty: int) -> None:
+    _need_coordinator(staff)
+    _check_condition(condition)
+    _check_qty(new_qty, 0, MAX_LEVEL)
+    item = await _locked(s, item_id)
+    lv = await levels(s, item.id)
+    delta = new_qty - lv[condition]
+    if delta == 0:
+        return
+    before = sum(lv.values())
+    await _add(s, staff, item, condition, delta, "fix")
+    await _notify_low(s, item, before, before + delta)
+
+
+async def set_min(s, staff: Staff, item_id: int, min_qty: int | None) -> None:
+    _need_coordinator(staff)
+    if min_qty is not None:
+        _check_qty(min_qty, 0, MAX_LEVEL)
+    item = await _locked(s, item_id)
+    item.min_qty = min_qty
+    await s.flush()
+
+
+async def archive(s, staff: Staff, item_id: int) -> StockItem:
+    _need_coordinator(staff)
+    item = await _locked(s, item_id)
+    item.archived = True
+    await s.flush()
+    return item
+
+
+@dataclass
+class ItemRow:
+    item: StockItem
+    levels: dict[str, int]
+
+    @property
+    def total(self) -> int:
+        return sum(self.levels.values())
+
+    @property
+    def low(self) -> bool:
+        return self.item.min_qty is not None and self.total <= self.item.min_qty
+
+
+async def rows_for(s, items: list[StockItem]) -> list[ItemRow]:
+    by_id = {i.id: dict.fromkeys(CONDITIONS, 0) for i in items}
+    if by_id:
+        q = select(StockLevel.item_id, StockLevel.condition, StockLevel.qty).where(
+            StockLevel.item_id.in_(by_id)
+        )
+        for item_id, condition, qty in (await s.execute(q)).all():
+            by_id[item_id][condition] = qty
+    return [ItemRow(i, by_id[i.id]) for i in items]
+
+
+async def row(s, item: StockItem) -> ItemRow:
+    return (await rows_for(s, [item]))[0]
+
+
+async def category_totals(s) -> dict[str, int]:
+    out = dict.fromkeys(CATEGORIES, 0)
+    q = (
+        select(StockItem.category, func.coalesce(func.sum(StockLevel.qty), 0))
+        .outerjoin(StockLevel, StockLevel.item_id == StockItem.id)
+        .where(StockItem.archived.is_(False))
+        .group_by(StockItem.category)
+    )
+    for category, total in (await s.execute(q)).all():
+        if category in out:
+            out[category] = int(total)
+    return out
+
+
+async def items_in(s, category: str, page: int) -> tuple[list[ItemRow], int, int]:
+    active = (StockItem.category == category, StockItem.archived.is_(False))
+    count = await s.scalar(select(func.count()).select_from(StockItem).where(*active))
+    pages = max(1, ceil(count / PER_PAGE))
+    page = min(max(page, 0), pages - 1)
+    q = (
+        select(StockItem)
+        .where(*active)
+        .order_by(func.lower(StockItem.name), StockItem.id)
+        .offset(page * PER_PAGE)
+        .limit(PER_PAGE)
+    )
+    return await rows_for(s, list((await s.scalars(q)).all())), page, pages
+
+
+async def search(s, text: str, limit: int = 20) -> list[ItemRow]:
+    t = clean_name(text)
+    if not t:
+        return []
+    esc = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    q = (
+        select(StockItem)
+        .where(StockItem.archived.is_(False), StockItem.name.ilike(f"%{esc}%", escape="\\"))
+        .order_by(func.lower(StockItem.name), StockItem.id)
+        .limit(limit)
+    )
+    return await rows_for(s, list((await s.scalars(q)).all()))
