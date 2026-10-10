@@ -552,6 +552,7 @@ async def _comment_task(
     else:
         await tasks.link(s, staff.tg_chat_id, message.message_id, t.id)
         reply = f"💬 → {n} ✓" + (f"\n🎤 {text}" if is_voice and text else "")
+    reply = reply[:4096]  # ответ идёт мимо gateway, который режет до лимита Telegram
     if progress is not None:
         await progress.edit_text(reply)
     else:

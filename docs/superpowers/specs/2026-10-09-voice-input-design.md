@@ -55,7 +55,7 @@ Transcriber кладётся в `dp["stt"]` в `main.py` и приходит в 
 | `STT_MODEL` | `small` | `base` / `small` / `medium` (качество ↔ память и скорость) |
 | `STT_MAX_SECONDS` | `120` | голосовые длиннее не распознаются |
 
-Требование к серверу при `small`: от 4 ГБ RAM на VPS (модель ~1 ГБ в памяти). Образ бота растёт примерно на 300 МБ (`faster-whisper` + `ctranslate2` + `av`); ffmpeg не нужен — ogg/opus декодирует PyAV.
+Требование к серверу при `small`: от 4 ГБ RAM на VPS (модель ~1 ГБ в памяти). Образ бота растёт примерно с 0.5 до 1.4 ГБ (`faster-whisper` + `ctranslate2` + `av`); ffmpeg не нужен — ogg/opus декодирует PyAV.
 
 ### Общий шаг обработки голосового (`telegram/voice.py`)
 

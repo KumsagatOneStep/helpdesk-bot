@@ -13,6 +13,7 @@ dependencies = [
   "structlog>=24.4",
   "tzdata>=2024.2",
   "faster-whisper>=1.2.1",
+  # faster-whisper 1.2.1 passes av.open(metadata_errors=...), removed in PyAV 19 — see test_faster_whisper_decodes_telegram_ogg
   "av<19",
 ]
 

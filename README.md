@@ -20,7 +20,7 @@
    - `GREEN_API_ID_INSTANCE`, `GREEN_API_TOKEN`, `GREEN_API_URL`, `GREEN_API_MEDIA_URL` — из личного кабинета Green API (apiUrl и mediaUrl инстанса);
    - `POSTGRES_PASSWORD` — длинный пароль только из латинских букв и цифр (он подставляется в `DATABASE_URL`, спецсимволы вроде `@`, `:`, `/` сломают адрес);
    - `TASK_REMIND_HOUR` — час напоминаний о сроках задач, по умолчанию 9;
-   - `STT_ENABLED`, `STT_MODEL`, `STT_MAX_SECONDS` — распознавание голосовых (локальный Whisper). Для `small` нужно от 4 ГБ RAM; первое голосовое скачивает модель (~500 МБ) в `data/models`.
+   - `STT_ENABLED`, `STT_MODEL`, `STT_MAX_SECONDS` — распознавание голосовых (локальный Whisper). Для `small` нужно от 4 ГБ RAM; первое голосовое скачивает модель (~500 МБ) в `data/models`. Образ бота — около 1.4 ГБ.
 3. Папки и права (бот пишет от uid 10001, сервис бэкапа — от uid 999; в `.env` токены):
    ```bash
    mkdir -p data backups

@@ -562,7 +562,12 @@ class _ClosingTranscriber(FakeTranscriber):
         self.s, self.task_id = s, task_id
 
     async def transcribe(self, path):
-        await self.s.execute(update(Task).where(Task.id == self.task_id).values(status="closed"))
+        await self.s.execute(
+            update(Task)
+            .where(Task.id == self.task_id)
+            .values(status="closed")
+            .execution_options(synchronize_session=False)
+        )
         return await super().transcribe(path)
 
 
@@ -580,3 +585,17 @@ async def test_task_closed_during_recognition_no_comment(s, clock_, tmp_path):
     assert msg.edits == [f"З-{task.id} уже закрыта — комментарий не отправлен."]
     assert (await s.scalars(select(TaskComment))).all() == []
     assert (await s.scalars(select(Outbox))).all() == []
+
+
+async def test_voice_comment_long_transcript_echo_capped(s, clock_, tmp_path):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    await make_staff(s, tg_id=7, name="Тимур")
+    task = await make_task(s, erlan)
+    await tasks_svc.link(s, 6, 3333, task.id)
+    msg = _VoiceChatMessage(6, reply_to_message=SimpleNamespace(message_id=3333))
+    settings = SimpleNamespace(files_dir=str(tmp_path), stt_max_seconds=120)
+    await handlers._reply_to_client(msg, s, erlan, FakeBot(), settings, FakeTranscriber("я" * 5000))
+    [edit] = msg.edits
+    assert len(edit) <= 4096 and edit.startswith(f"💬 → З-{task.id} ✓\n🎤 я")
+    [cm] = (await s.scalars(select(TaskComment))).all()
+    assert cm.text == "я" * 5000

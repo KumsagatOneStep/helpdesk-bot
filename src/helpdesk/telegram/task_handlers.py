@@ -198,7 +198,7 @@ async def stt_edit(cq: CallbackQuery, state: FSMContext):
 
 @router.message(TaskForm.description, IsActive(), NOT_CANCEL, NOT_LEAVING)
 async def bad_description(message: Message):
-    await message.answer("Пришлите описание текстом, фото или файлом.")
+    await message.answer("Пришлите описание текстом, голосовым, фото или файлом.")
 
 
 async def _ask_due(message, state: FSMContext) -> None:
