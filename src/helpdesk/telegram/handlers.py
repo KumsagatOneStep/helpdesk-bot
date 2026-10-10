@@ -17,7 +17,7 @@ from helpdesk.stats import service as stats
 from helpdesk.tasks import render as task_render
 from helpdesk.tasks import rules as task_rules
 from helpdesk.tasks import service as tasks
-from helpdesk.telegram import menu, task_handlers, voice
+from helpdesk.telegram import menu, stock_handlers, task_handlers, voice
 from helpdesk.telegram.filters import ID_DATA as _ID_DATA
 from helpdesk.telegram.filters import IsActive, IsAdmin
 from helpdesk.telegram.filters import arg_id as _arg_id
@@ -618,8 +618,9 @@ async def cb_fallback(cq: CallbackQuery):
 
 def setup(dp: Dispatcher, sf) -> None:
     mw = DbMiddleware(sf)
-    for r in (task_handlers.router, router):
+    for r in (task_handlers.router, stock_handlers.router, router):
         r.message.outer_middleware(mw)
         r.callback_query.outer_middleware(mw)
     dp.include_router(task_handlers.router)  # раньше общего: у общего есть catch-all
+    dp.include_router(stock_handlers.router)
     dp.include_router(router)
