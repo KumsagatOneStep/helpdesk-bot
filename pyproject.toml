@@ -13,6 +13,7 @@ dependencies = [
   "structlog>=24.4",
   "tzdata>=2024.2",
   "faster-whisper>=1.2.1",
+  "av<19",
 ]
 
 [dependency-groups]

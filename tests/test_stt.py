@@ -1,4 +1,9 @@
+from fractions import Fraction
 from types import SimpleNamespace
+
+import av
+import faster_whisper.audio
+import numpy as np
 
 from helpdesk import stt
 
@@ -59,3 +64,24 @@ def test_make_transcriber(tmp_path):
     assert (w.model_name, w.download_root) == ("base", str(tmp_path / "models"))
     off = SimpleNamespace(stt_enabled=False, stt_model="base", files_dir="/data/files")
     assert isinstance(stt.make_transcriber(off), stt.DisabledTranscriber)
+
+
+def test_faster_whisper_decodes_telegram_ogg(tmp_path):
+    path = tmp_path / "voice.ogg"
+    rate = 48000
+    with av.open(str(path), mode="w", format="ogg") as out:
+        stream = out.add_stream("libopus", rate=rate)
+        stream.layout = "mono"
+        t = np.arange(rate // 2) / rate
+        samples = (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32).reshape(1, -1)
+        frame = av.AudioFrame.from_ndarray(samples, format="flt", layout="mono")
+        frame.sample_rate = rate
+        frame.pts = 0
+        frame.time_base = Fraction(1, rate)
+        for packet in stream.encode(frame):
+            out.mux(packet)
+        for packet in stream.encode(None):
+            out.mux(packet)
+    audio = faster_whisper.audio.decode_audio(str(path))
+    assert isinstance(audio, np.ndarray)
+    assert audio.size > 0
