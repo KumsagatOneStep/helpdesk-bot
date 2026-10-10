@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from helpdesk.db.models import Task
 from helpdesk.telegram import menu, task_handlers
 from helpdesk.telegram.task_handlers import TaskForm
 from tests.factories import make_staff, make_task
+from tests.fakes import FakeTranscriber
 
 
 class Msg:
@@ -219,3 +221,133 @@ async def test_menu_button_in_dialog_reaches_main_router(s, clock_):
         assert await dp.fsm.storage.get_state(key) is None
     finally:
         task_handlers.router._parent_router = None
+
+
+class _Progress:
+    def __init__(self):
+        self.edits = []
+
+    async def edit_text(self, text, reply_markup=None, **kw):
+        self.edits.append((text, reply_markup))
+
+
+class _VoiceMsg(Msg):
+    def __init__(self, duration=5):
+        super().__init__(voice=SimpleNamespace(duration=duration, file_size=10, file_unique_id="v"))
+        self.progress = []
+
+    async def answer(self, text, **kw):
+        self.answers.append(text)
+        p = _Progress()
+        self.progress.append(p)
+        return p
+
+
+class _DlBot:
+    async def download(self, obj, destination):
+        Path(destination).write_bytes(b"ogg")
+
+
+def _vs(tmp_path):
+    return SimpleNamespace(files_dir=str(tmp_path), stt_max_seconds=120)
+
+
+def _kb(markup_):
+    if markup_ is None:
+        return None
+    return [[(b.text, b.callback_data) for b in row] for row in markup_.inline_keyboard]
+
+
+async def test_voice_description_confirm_and_create(s, clock_, state, tmp_path):
+    erlan = await make_staff(s, tg_id=1, name="Ерлан")
+    await state.set_state(TaskForm.description)
+    await state.update_data(kind="helpdesk")
+    m = _VoiceMsg()
+    await task_handlers.got_voice(
+        m, state, _DlBot(), _vs(tmp_path), FakeTranscriber("Заменить картридж")
+    )
+    assert await state.get_state() == TaskForm.description_confirm.state
+    text, kb = m.progress[0].edits[-1]
+    assert text == "🎤 Распознано:\n«Заменить картридж»"
+    assert _kb(kb) == [[("✅ Подходит", "tkn_stt_ok"), ("✏️ Исправить", "tkn_stt_edit")]]
+    await task_handlers.stt_ok(Cq("tkn_stt_ok"), state)
+    assert await state.get_state() == TaskForm.requester.state
+    data = await state.get_data()
+    assert data["description"] == "Заменить картридж"
+    assert data["file_kind"] == "voice" and data["file_name"] == "voice.ogg"
+    await state.update_data(requester=None, due=None)
+    await state.set_state(TaskForm.confirm)
+    await task_handlers.confirm_create(Cq("tkn_ok"), state, s, erlan)
+    t = await s.scalar(select(Task))
+    assert (t.description, t.file_kind) == ("Заменить картридж", "voice")
+
+
+async def test_voice_edit_goes_back(state, tmp_path, clock_):
+    await state.set_state(TaskForm.description)
+    await task_handlers.got_voice(_VoiceMsg(), state, _DlBot(), _vs(tmp_path), FakeTranscriber("x"))
+    cq = Cq("tkn_stt_edit")
+    await task_handlers.stt_edit(cq, state)
+    assert await state.get_state() == TaskForm.description.state
+    assert cq.message.answers == ["Отправьте описание текстом или запишите голосовое заново."]
+
+
+async def test_text_in_confirm_state_is_description(state, clock_):
+    await state.set_state(TaskForm.description_confirm)
+    await state.update_data(stt_text="плохо распознано")
+    await task_handlers.got_description(Msg("Правильный текст"), state)
+    assert (await state.get_data())["description"] == "Правильный текст"
+    assert await state.get_state() == TaskForm.requester.state
+
+
+async def test_voice_failed_stays_on_description(state, tmp_path, clock_):
+    await state.set_state(TaskForm.description)
+    m = _VoiceMsg()
+    await task_handlers.got_voice(m, state, _DlBot(), _vs(tmp_path), FakeTranscriber(None))
+    assert await state.get_state() == TaskForm.description.state
+    assert m.progress[0].edits[-1] == (
+        "Не удалось распознать — напишите текстом или запишите ещё раз.",
+        None,
+    )
+
+
+async def test_voice_too_long_and_disabled(state, tmp_path, clock_):
+    await state.set_state(TaskForm.description)
+    long = _VoiceMsg(duration=200)
+    await task_handlers.got_voice(long, state, _DlBot(), _vs(tmp_path), FakeTranscriber("x"))
+    assert long.answers == ["Голосовое длиннее 120 секунд — напишите текстом."]
+    off = _VoiceMsg()
+    await task_handlers.got_voice(
+        off, state, _DlBot(), _vs(tmp_path), FakeTranscriber("x", enabled=False)
+    )
+    assert off.answers == ["Распознавание выключено — напишите текстом."]
+    assert await state.get_state() == TaskForm.description.state
+
+
+async def test_voice_keeps_existing_photo_attachment(state, tmp_path, clock_):
+    await state.set_state(TaskForm.description)
+    await state.update_data(file_path="/f/p.jpg", file_name="photo_p.jpg", file_kind="photo")
+    await task_handlers.got_voice(_VoiceMsg(), state, _DlBot(), _vs(tmp_path), FakeTranscriber("x"))
+    data = await state.get_data()
+    assert (data["file_kind"], data["file_name"]) == ("photo", "photo_p.jpg")
+
+
+async def test_voice_text_clipped_to_limit(state, tmp_path, clock_):
+    await state.set_state(TaskForm.description)
+    m = _VoiceMsg()
+    await task_handlers.got_voice(m, state, _DlBot(), _vs(tmp_path), FakeTranscriber("я" * 2100))
+    assert len((await state.get_data())["stt_text"]) == 2000
+    assert m.progress[0].edits[-1][0].endswith("(обрезано до 2000 символов)")
+
+
+async def test_voice_in_description_handled_by_got_voice():
+    staff = SimpleNamespace(status="active", is_admin=False)
+    v = {"file_id": "f", "file_unique_id": "u", "duration": 3}
+    for st in (TaskForm.description, TaskForm.description_confirm):
+        names = await _matched_names(_message(voice=v), st.state, staff)
+        assert names and names[0] == "got_voice", (st, names)
+
+
+async def test_stt_buttons_outside_step_are_stale():
+    cq = Cq("tkn_stt_ok")
+    await task_handlers.stale_dialog(cq)
+    assert cq.alerts == ["Диалог уже завершён"]

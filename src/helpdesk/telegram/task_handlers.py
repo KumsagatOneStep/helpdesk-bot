@@ -12,7 +12,7 @@ from helpdesk.config import Settings
 from helpdesk.db.models import Staff
 from helpdesk.tasks import render
 from helpdesk.tasks import service as tasks
-from helpdesk.telegram import menu
+from helpdesk.telegram import menu, voice
 from helpdesk.telegram.filters import ID_DATA, IsActive, arg_id
 from helpdesk.telegram.gateway import markup
 from helpdesk.telegram.media import FileTooBig, extract_content
@@ -26,6 +26,7 @@ router.callback_query.filter(F.message.chat.type == "private")
 class TaskForm(StatesGroup):
     kind = State()
     description = State()
+    description_confirm = State()
     requester = State()
     due = State()
     due_custom = State()
@@ -40,6 +41,7 @@ DUE_BUTTONS = [
     [("Без срока", "tkn_due:none")],
 ]
 CONFIRM_BUTTONS = [[("✅ Создать", "tkn_ok"), ("Отмена", "tkn_cancel")]]
+STT_BUTTONS = [[("✅ Подходит", "tkn_stt_ok"), ("✏️ Исправить", "tkn_stt_edit")]]
 NOT_CANCEL = F.text != menu.CANCEL
 NOT_LEAVING = ~F.text.func(lambda text: leaves_dialog(text))
 
@@ -84,7 +86,9 @@ async def pick_kind(cq: CallbackQuery, state: FSMContext):
     await state.update_data(kind=kind)
     await state.set_state(TaskForm.description)
     await cq.message.edit_text(f"Тип: {render.KIND_RU[kind]}")
-    await cq.message.answer("Опишите задачу текстом. Можно прислать фото или файл с подписью.")
+    await cq.message.answer(
+        "Опишите задачу текстом или голосовым. Можно прислать фото или файл с подписью."
+    )
     await cq.answer()
 
 
@@ -103,7 +107,11 @@ def _too_long(text: str) -> str | None:
     return None
 
 
-@router.message(TaskForm.description, IsActive(), F.text.func(menu.is_client_reply_text))
+@router.message(
+    StateFilter(TaskForm.description, TaskForm.description_confirm),
+    IsActive(),
+    F.text.func(menu.is_client_reply_text),
+)
 async def got_description(message: Message, state: FSMContext):
     text = message.text.strip()
     if err := _too_long(text):
@@ -134,6 +142,58 @@ async def got_attachment(message: Message, state: FSMContext, bot, settings: Set
         return
     await state.update_data(description=caption)
     await _ask_requester(message, state)
+
+
+@router.message(
+    StateFilter(TaskForm.description, TaskForm.description_confirm),
+    IsActive(),
+    F.voice | F.audio,
+)
+async def got_voice(message: Message, state: FSMContext, bot, settings: Settings, stt):
+    try:
+        r = await voice.recognize(message, bot, settings, stt, keep_file=False)
+    except FileTooBig:
+        await message.answer("Файл больше 20 МБ — бот не может его скачать.")
+        return
+    await state.set_state(TaskForm.description)
+    if r.status == "disabled":
+        await message.answer("Распознавание выключено — напишите текстом.")
+        return
+    if r.status == "too_long":
+        await message.answer(
+            f"Голосовое длиннее {settings.stt_max_seconds} секунд — напишите текстом."
+        )
+        return
+    if r.status == "failed":
+        await r.progress.edit_text("Не удалось распознать — напишите текстом или запишите ещё раз.")
+        return
+    if not (await state.get_data()).get("file_path"):
+        await state.update_data(
+            file_path=r.content.file_path, file_name=r.content.file_name, file_kind="voice"
+        )
+    text, note = r.text, ""
+    if len(text) > render.MAX_DESCRIPTION:
+        text = text[: render.MAX_DESCRIPTION]
+        note = f"\n(обрезано до {render.MAX_DESCRIPTION} символов)"
+    await state.update_data(stt_text=text)
+    await state.set_state(TaskForm.description_confirm)
+    await r.progress.edit_text(f"🎤 Распознано:\n«{text}»{note}", reply_markup=markup(STT_BUTTONS))
+
+
+@router.callback_query(TaskForm.description_confirm, F.data == "tkn_stt_ok", IsActive())
+async def stt_ok(cq: CallbackQuery, state: FSMContext):
+    await state.update_data(description=(await state.get_data())["stt_text"])
+    await _drop_markup(cq)
+    await _ask_requester(cq.message, state)
+    await cq.answer()
+
+
+@router.callback_query(TaskForm.description_confirm, F.data == "tkn_stt_edit", IsActive())
+async def stt_edit(cq: CallbackQuery, state: FSMContext):
+    await state.set_state(TaskForm.description)
+    await _drop_markup(cq)
+    await cq.message.answer("Отправьте описание текстом или запишите голосовое заново.")
+    await cq.answer()
 
 
 @router.message(TaskForm.description, IsActive(), NOT_CANCEL, NOT_LEAVING)

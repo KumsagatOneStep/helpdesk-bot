@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import BotCommand
 
-from helpdesk import clock, reminders
+from helpdesk import clock, reminders, stt
 from helpdesk.config import Settings
 from helpdesk.db.session import make_engine, make_session_factory
 from helpdesk.delivery import worker
@@ -34,6 +34,7 @@ async def amain() -> None:
     )
     dp = Dispatcher(events_isolation=SimpleEventIsolation())
     dp["settings"] = settings
+    dp["stt"] = stt.make_transcriber(settings)
     setup(dp, sf)
 
     stop = asyncio.Event()
