@@ -1,14 +1,18 @@
+from dataclasses import asdict
+from io import BytesIO
+
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from helpdesk.db.models import Staff
 from helpdesk.stock import render
 from helpdesk.stock import service as stock
+from helpdesk.stock import xlsx as stock_xlsx
 from helpdesk.stock.catalog import CATEGORIES, CONDITION_ONE, CONDITIONS
 from helpdesk.telegram import menu
 from helpdesk.telegram.filters import ID_DATA, IsActive, arg_id
@@ -537,6 +541,86 @@ async def cb_new_skip_min(cq: CallbackQuery, state: FSMContext, s, staff: Staff)
         return
     await _drop_markup(cq)
     await _create(cq.message, state, s, staff, None)
+    await cq.answer()
+
+
+# ── xlsx ───────────────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data == "sk_xlsx", IsActive())
+async def cb_export(cq: CallbackQuery, s, staff: Staff):
+    data = await stock_xlsx.export(s)
+    await cq.message.answer_document(
+        BufferedInputFile(data, filename="Склад.xlsx"), caption="Склад: остатки и движение"
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data == "sk_upl", IsActive())
+async def cb_upload(cq: CallbackQuery, state: FSMContext, staff: Staff):
+    if await _deny(cq, staff):
+        return
+    await state.clear()
+    await state.set_state(StockForm.import_file)
+    await cq.message.answer_document(
+        BufferedInputFile(stock_xlsx.template(), filename="Склад-шаблон.xlsx"),
+        caption=(
+            "Заполните лист «Склад» и пришлите файл сюда (.xlsx, до 2 МБ, до 1000 строк). "
+            "Количество прибавляется к остатку — не загружайте один файл дважды."
+        ),
+        reply_markup=menu.cancel_menu(),
+    )
+    await cq.answer()
+
+
+@router.message(StockForm.import_file, IsActive(), F.document)
+async def got_import_file(message: Message, state: FSMContext, s, staff: Staff, bot):
+    if not await _coord_text(message, state, staff):
+        return
+    doc = message.document
+    if not (doc.file_name or "").lower().endswith(".xlsx"):
+        await message.answer("Нужен файл .xlsx.")
+        return
+    if (doc.file_size or 0) > stock_xlsx.MAX_BYTES:
+        await message.answer("Файл больше 2 МБ.")
+        return
+    buf = BytesIO()
+    await bot.download(doc, destination=buf)
+    try:
+        rows, errors = stock_xlsx.parse(buf.getvalue())
+    except stock_xlsx.BadFile as e:
+        await message.answer(str(e))
+        return
+    shown = "\n".join(errors[:10]) + (f"\n…и ещё {len(errors) - 10}" if len(errors) > 10 else "")
+    if not rows:
+        await message.answer("Нет строк для загрузки." + (f"\n{shown}" if shown else ""))
+        return
+    new, existing = await stock.preview_import(s, rows)
+    text = f"Новых позиций: {new}, приход по существующим: {existing}, ошибки: {len(errors)}"
+    if shown:
+        text += f"\n{shown}"
+    await state.set_state(StockForm.import_confirm)
+    await state.update_data(rows=[asdict(r) for r in rows])
+    await message.answer(
+        text,
+        reply_markup=markup(
+            [[("✅ Загрузить (без ошибочных строк)", "sk_uplok"), ("✖️ Отмена", "sk_cancel")]]
+        ),
+    )
+
+
+@router.callback_query(StockForm.import_confirm, F.data == "sk_uplok", IsActive())
+async def cb_upload_ok(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
+    if await _deny(cq, staff):
+        return
+    rows = [stock.ImportRow(**r) for r in (await state.get_data())["rows"]]
+    await state.clear()
+    await _drop_markup(cq)
+    created, received = await stock.apply_import(s, staff, rows)
+    await cq.message.answer(
+        f"✅ Загружено: новых позиций {created}, строк с приходом {received}.",
+        reply_markup=menu.main_menu(staff),
+    )
     await cq.answer()
 
 

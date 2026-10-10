@@ -1,3 +1,4 @@
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
@@ -5,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
+from openpyxl import Workbook
 
 from helpdesk.stock import service as stock
 from helpdesk.telegram import menu, stock_handlers
@@ -361,3 +363,116 @@ async def test_coordinator_callbacks_rejected_for_specialist(s, clock_, state):
     await stock_handlers.got_in_qty(m, state, s, erlan)
     assert m.answers[-1][0] == "Только для координатора."
     assert (await stock.levels(s, hp.id))["new"] == 7
+
+
+def _xlsx(rows) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Категория", "Название", "Состояние", "Количество", "Минимум"])
+    for r in rows:
+        ws.append(r)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class _Bot:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    async def download(self, obj, destination):
+        destination.write(self.data)
+
+
+def _doc(name="Склад.xlsx", size=100):
+    return SimpleNamespace(file_name=name, file_size=size, file_id="f", file_unique_id="u")
+
+
+async def test_export_button(s, clock_):
+    _, erlan, _ = await _setup(s)
+    cq = Cq("sk_xlsx")
+    await stock_handlers.cb_export(cq, s, erlan)
+    doc, caption = cq.message.docs[-1]
+    assert doc.filename == "Склад.xlsx" and caption == "Склад: остатки и движение"
+
+
+async def test_upload_flow(s, clock_, state):
+    coord, _, hp = await _setup(s)
+    cq = Cq("sk_upl")
+    await stock_handlers.cb_upload(cq, state, coord)
+    assert await state.get_state() == StockForm.import_file.state
+    assert cq.message.docs[-1][0].filename == "Склад-шаблон.xlsx"
+    data = _xlsx(
+        [
+            ["Картриджи", "Картридж HP 85A", "новые", 3, None],
+            ["Мыши", "Мышь USB", "б/у", 4, 1],
+            ["Принтер", "X", "новые", 1, None],
+        ]
+    )
+    m = Msg(document=_doc(size=len(data)))
+    await stock_handlers.got_import_file(m, state, s, coord, _Bot(data))
+    text, markup_ = m.answers[-1]
+    assert text == (
+        "Новых позиций: 1, приход по существующим: 1, ошибки: 1\n"
+        "строка 4: неизвестная категория «Принтер»"
+    )
+    assert kb(markup_) == [
+        [("✅ Загрузить (без ошибочных строк)", "sk_uplok"), ("✖️ Отмена", "sk_cancel")]
+    ]
+    assert await state.get_state() == StockForm.import_confirm.state
+    assert (await stock.levels(s, hp.id))["new"] == 7  # ничего не записано до подтверждения
+    cq = Cq("sk_uplok")
+    await stock_handlers.cb_upload_ok(cq, state, s, coord)
+    assert cq.message.answers[-1][0] == "✅ Загружено: новых позиций 1, строк с приходом 2."
+    assert (await stock.levels(s, hp.id))["new"] == 10
+    assert await state.get_state() is None
+
+
+async def test_upload_rejects_bad_files(s, clock_, state):
+    coord, _, _ = await _setup(s)
+    await stock_handlers.cb_upload(Cq("sk_upl"), state, coord)
+    m = Msg(document=_doc(name="склад.csv"))
+    await stock_handlers.got_import_file(m, state, s, coord, _Bot(b""))
+    assert m.answers[-1][0] == "Нужен файл .xlsx."
+    m = Msg(document=_doc(size=3 * 1024 * 1024))
+    await stock_handlers.got_import_file(m, state, s, coord, _Bot(b""))
+    assert m.answers[-1][0] == "Файл больше 2 МБ."
+    m = Msg(document=_doc())
+    await stock_handlers.got_import_file(m, state, s, coord, _Bot(b"garbage"))
+    assert m.answers[-1][0] == "Не удалось прочитать файл — нужен .xlsx."
+    data = _xlsx([["Принтер", "X", "новые", 1, None]])
+    m = Msg(document=_doc(size=len(data)))
+    await stock_handlers.got_import_file(m, state, s, coord, _Bot(data))
+    assert m.answers[-1][0].startswith("Нет строк для загрузки.\nстрока 2:")
+    assert await state.get_state() == StockForm.import_file.state  # можно прислать другой
+
+
+async def test_upload_rejected_for_specialist(s, clock_, state):
+    _, erlan, _ = await _setup(s)
+    cq = Cq("sk_upl")
+    await stock_handlers.cb_upload(cq, state, erlan)
+    assert cq.alerts == ["Только для координатора"] and cq.message.docs == []
+    await state.set_state(StockForm.import_confirm)
+    await state.update_data(
+        rows=[
+            {
+                "line": 2,
+                "category": "mice",
+                "name": "Мышь",
+                "condition": "new",
+                "qty": 5,
+                "min_qty": None,
+            }
+        ]
+    )
+    cq = Cq("sk_uplok")
+    await stock_handlers.cb_upload_ok(cq, state, s, erlan)
+    assert cq.alerts == ["Только для координатора"]
+    assert await stock.find_active(s, "mice", "Мышь") is None
+
+
+async def test_document_in_import_state_routed_to_import():
+    staff = SimpleNamespace(status="active", is_admin=False, role="coordinator")
+    doc = {"file_id": "f", "file_unique_id": "u", "file_name": "a.xlsx", "file_size": 10}
+    names = await _matched_names(_message(document=doc), StockForm.import_file.state, staff)
+    assert names[0] == "got_import_file"
