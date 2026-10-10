@@ -219,11 +219,12 @@ class StockLevel(Base):
     __table_args__ = (CheckConstraint("qty >= 0", name="ck_stock_levels_qty"),)
     item_id: Mapped[int] = mapped_column(ForeignKey("stock_items.id"), primary_key=True)
     condition: Mapped[str] = mapped_column(String(16), primary_key=True)
-    qty: Mapped[int] = mapped_column(default=0)
+    qty: Mapped[int] = mapped_column(default=0, server_default="0")
 
 
 class StockMove(Base):
     __tablename__ = "stock_moves"
+    __table_args__ = (CheckConstraint("delta <> 0", name="ck_stock_moves_delta"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("stock_items.id"), index=True)
     condition: Mapped[str] = mapped_column(String(16))

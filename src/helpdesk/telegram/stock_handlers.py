@@ -25,6 +25,8 @@ router.callback_query.filter(F.message.chat.type == "private")
 ONLY_COORD = "Только для координатора"
 COND_RE = "(new|used|repaired)"
 NOT_CANCEL = F.text != menu.CANCEL
+TAKE_QTY_RE = rf"^sk_tq:\d{{1,9}}:{COND_RE}:([1-9]\d{{0,3}}|other)$"
+STALE = "Диалог уже завершён"
 
 
 class StockForm(StatesGroup):
@@ -158,15 +160,15 @@ async def got_search(message: Message, state: FSMContext, s, staff: Staff):
 # ── Взять ──────────────────────────────────────────────────────────────
 
 
-async def _ask_take_qty(message, state: FSMContext, row, condition: str) -> None:
-    available = row.levels[condition]
+async def _ask_take_qty(message, state: FSMContext, item, condition: str, available: int) -> None:
     await state.clear()
     await state.set_state(StockForm.take_qty)
-    await state.update_data(item_id=row.item.id, condition=condition)
-    buttons = [[(str(n), f"sk_tq:{n}") for n in (1, 2, 3) if n <= available]]
-    buttons[0].append(("Другое", "sk_tq:other"))
+    await state.update_data(item_id=item.id, condition=condition)
+    tq = f"sk_tq:{item.id}:{condition}"
+    buttons = [[(str(n), f"{tq}:{n}") for n in (1, 2, 3) if n <= available]]
+    buttons[0].append(("Другое", f"{tq}:other"))
     await message.answer(
-        f"{row.item.name} ({CONDITION_ONE[condition]}), есть {available}. Сколько взять?",
+        f"{item.name} ({CONDITION_ONE[condition]}), есть {available}. Сколько взять?",
         reply_markup=markup(buttons),
     )
 
@@ -181,7 +183,7 @@ async def cb_take(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
         await cq.answer("Нет в наличии", show_alert=True)
         return
     if len(have) == 1:
-        await _ask_take_qty(cq.message, state, row, have[0])
+        await _ask_take_qty(cq.message, state, row.item, have[0], row.levels[have[0]])
     else:
         buttons = [
             [(f"{CONDITIONS[c]} · {row.levels[c]}", f"sk_tc:{row.item.id}:{c}") for c in have]
@@ -200,7 +202,7 @@ async def cb_take_cond(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
     if row.levels[condition] == 0:
         await cq.message.answer("Этого уже нет в наличии.")
     else:
-        await _ask_take_qty(cq.message, state, row, condition)
+        await _ask_take_qty(cq.message, state, row.item, condition, row.levels[condition])
     await cq.answer()
 
 
@@ -218,6 +220,8 @@ async def _do_take(message, state: FSMContext, s, staff: Staff, qty: int) -> Non
             await message.answer("Уже закончилось.", reply_markup=menu.main_menu(staff))
         else:
             await message.answer(f"Осталось только {r.available}.")
+            item = await stock.get_item(s, data["item_id"])
+            await _ask_take_qty(message, state, item, data["condition"], r.available)
         return
     await state.clear()
     item = await stock.get_item(s, data["item_id"])
@@ -227,11 +231,14 @@ async def _do_take(message, state: FSMContext, s, staff: Staff, qty: int) -> Non
     )
 
 
-@router.callback_query(StockForm.take_qty, F.data.regexp(r"^sk_tq:(\d{1,4}|other)$"), IsActive())
+@router.callback_query(StockForm.take_qty, F.data.regexp(TAKE_QTY_RE), IsActive())
 async def cb_take_qty(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
-    arg = cq.data.split(":")[1]
+    _, item_id, condition, arg = cq.data.split(":")
+    data = await state.get_data()
+    if (data.get("item_id"), data.get("condition")) != (int(item_id), condition):
+        await cq.answer(STALE, show_alert=True)  # кнопка из прежнего диалога
+        return
     if arg == "other":
-        data = await state.get_data()
         have = (await stock.levels(s, data["item_id"]))[data["condition"]]
         await cq.message.answer(
             f"Введите число от 1 до {max(have, 1)}.", reply_markup=menu.cancel_menu()
@@ -386,7 +393,7 @@ async def cb_min(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
     now = row.item.min_qty if row.item.min_qty is not None else "не задан"
     await cq.message.answer(
         f"Минимум для «{row.item.name}» (сейчас {now}). Введите число 0–{stock.MAX_LEVEL}:",
-        reply_markup=markup([[("Убрать", "sk_minx")]]),
+        reply_markup=markup([[("Убрать", f"sk_minx:{row.item.id}")]]),
     )
     await cq.answer()
 
@@ -419,9 +426,12 @@ async def got_min(message: Message, state: FSMContext, s, staff: Staff):
     await _apply_min(message, state, s, staff, value)
 
 
-@router.callback_query(StockForm.min_qty, F.data == "sk_minx", IsActive())
+@router.callback_query(StockForm.min_qty, F.data.regexp(ID_DATA.format("sk_minx")), IsActive())
 async def cb_min_clear(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
     if await _deny(cq, staff):
+        return
+    if (await state.get_data()).get("item_id") != arg_id(cq):
+        await cq.answer(STALE, show_alert=True)  # кнопка из прежнего диалога
         return
     await _drop_markup(cq)
     await _apply_min(cq.message, state, s, staff, None)
@@ -448,6 +458,7 @@ async def cb_arch_ok(cq: CallbackQuery, s, staff: Staff):
     try:
         item = await stock.archive(s, staff, arg_id(cq))
     except stock.Archived:
+        await _drop_markup(cq)
         await cq.answer("Позиция в архиве", show_alert=True)
         return
     await _edit(cq, f"🗄 {item.name} — в архиве.", None)
@@ -513,6 +524,7 @@ async def _create(message, state: FSMContext, s, staff: Staff, min_qty: int | No
     try:
         item = await stock.create_item(s, staff, data["category"], data["name"], min_qty)
     except stock.DuplicateName as e:
+        await message.answer("Отменено.", reply_markup=menu.main_menu(staff))
         await message.answer(
             "Уже есть такая позиция.", reply_markup=markup([[("Открыть", f"sk_item:{e.item_id}")]])
         )
@@ -616,7 +628,15 @@ async def cb_upload_ok(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
     rows = [stock.ImportRow(**r) for r in (await state.get_data())["rows"]]
     await state.clear()
     await _drop_markup(cq)
-    created, received = await stock.apply_import(s, staff, rows)
+    try:
+        async with s.begin_nested():  # ошибка откатывает весь импорт, а не коммитится частично
+            created, received = await stock.apply_import(s, staff, rows)
+    except stock.StockError:
+        await cq.message.answer(
+            "Не удалось загрузить — пришлите файл заново.", reply_markup=menu.main_menu(staff)
+        )
+        await cq.answer()
+        return
     await cq.message.answer(
         f"✅ Загружено: новых позиций {created}, строк с приходом {received}.",
         reply_markup=menu.main_menu(staff),
@@ -635,4 +655,4 @@ async def stray_input(message: Message):
 
 @router.callback_query(F.data.startswith("sk_"))
 async def stale(cq: CallbackQuery):
-    await cq.answer("Диалог уже завершён", show_alert=True)
+    await cq.answer(STALE, show_alert=True)

@@ -4,6 +4,7 @@ from math import ceil
 import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 
 from helpdesk.db.models import Staff, StockItem, StockLevel, StockMove
 from helpdesk.delivery import outbox
@@ -72,7 +73,7 @@ def clean_name(name: str) -> str:
 async def find_active(s, category: str, name: str) -> StockItem | None:
     q = select(StockItem).where(
         StockItem.category == category,
-        func.lower(StockItem.name) == clean_name(name).lower(),
+        func.lower(StockItem.name) == func.lower(clean_name(name)),
         StockItem.archived.is_(False),
     )
     return await s.scalar(q)
@@ -90,8 +91,14 @@ async def create_item(s, staff: Staff, category: str, name: str, min_qty=None) -
     if dup := await find_active(s, category, name):
         raise DuplicateName(dup.id)
     item = StockItem(category=category, name=name, min_qty=min_qty)
-    s.add(item)
-    await s.flush()
+    try:
+        async with s.begin_nested():  # гонка за имя: откатываем только эту вставку
+            s.add(item)
+            await s.flush()
+    except IntegrityError:
+        if dup := await find_active(s, category, name):
+            raise DuplicateName(dup.id) from None
+        raise
     return item
 
 

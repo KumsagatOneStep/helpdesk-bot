@@ -1,9 +1,10 @@
 import asyncio
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
-from helpdesk.db.models import Staff, StockMove
+from helpdesk.db.models import Staff, StockItem, StockMove
 from helpdesk.stock import service as stock
 from tests.factories import clear_outbox, make_staff, payloads
 
@@ -189,3 +190,40 @@ async def test_totals_pages_and_search(s, clock_):
     assert [r.item.name for r in found] == ["HDMI 2м"]
     assert await stock.search(s, "%") == []  # спецсимволы LIKE экранируются
     assert len(await stock.search(s, "кабель")) == 12
+
+
+async def test_find_active_lowercases_both_sides_in_sql(s, clock_):
+    coord, _ = await _people(s)
+    # Python: "İ".lower() == "i̇" (2 символа), PostgreSQL lower('İ') == 'i'
+    item = await stock.create_item(s, coord, "cartridges", "İnkjet")
+    assert (await stock.find_active(s, "cartridges", "İnkjet")).id == item.id
+    with pytest.raises(stock.DuplicateName) as e:
+        await stock.create_item(s, coord, "cartridges", "İNKJET")
+    assert e.value.item_id == item.id
+
+
+async def test_create_item_unique_race_is_duplicate_name(s, clock_, monkeypatch):
+    coord, _ = await _people(s)
+    item = await stock.create_item(s, coord, "mice", "Мышь USB")
+    real = stock.find_active
+    calls = []
+
+    async def miss_once(*args):
+        calls.append(args)
+        return None if len(calls) == 1 else await real(*args)
+
+    monkeypatch.setattr(stock, "find_active", miss_once)
+    with pytest.raises(stock.DuplicateName) as e:
+        await stock.create_item(s, coord, "mice", "мышь usb")
+    assert e.value.item_id == item.id and len(calls) == 2
+    # сессия жива: откатилась только вставка дубля
+    assert await stock.levels(s, item.id) == {"new": 0, "used": 0, "repaired": 0}
+    assert await s.scalar(select(func.count()).select_from(StockItem)) == 1
+
+
+async def test_move_delta_zero_rejected_by_db(s, clock_):
+    coord, _ = await _people(s)
+    item = await stock.create_item(s, coord, "mice", "Мышь")
+    s.add(StockMove(item_id=item.id, condition="new", delta=0, kind="fix", staff_id=coord.id))
+    with pytest.raises(IntegrityError, match="ck_stock_moves_delta"):
+        await s.flush()

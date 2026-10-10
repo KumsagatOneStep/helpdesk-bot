@@ -1,3 +1,4 @@
+import re
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ class Msg:
         self.answers = []  # (text, reply_markup)
         self.edits = []
         self.docs = []
+        self.markup_dropped = False
 
     async def answer(self, text, reply_markup=None, **kw):
         self.answers.append((text, reply_markup))
@@ -30,7 +32,7 @@ class Msg:
         self.edits.append((text, reply_markup))
 
     async def edit_reply_markup(self, **kw):
-        pass
+        self.markup_dropped = True
 
     async def answer_document(self, document, caption=None, **kw):
         self.docs.append((document, caption))
@@ -135,13 +137,17 @@ async def test_take_flow_single_condition_and_shortage(s, clock_, state):
     assert await state.get_state() == StockForm.take_qty.state
     text, markup_ = cq.message.answers[-1]
     assert text == "Картридж HP 85A (новый), есть 7. Сколько взять?"
+    tq = f"sk_tq:{hp.id}:new"
     assert kb(markup_) == [
-        [("1", "sk_tq:1"), ("2", "sk_tq:2"), ("3", "sk_tq:3"), ("Другое", "sk_tq:other")]
+        [("1", f"{tq}:1"), ("2", f"{tq}:2"), ("3", f"{tq}:3"), ("Другое", f"{tq}:other")]
     ]
     await stock.take(s, coord, hp.id, "new", 6)  # кто-то успел раньше: осталась 1
-    cq = Cq("sk_tq:2")
+    cq = Cq(f"{tq}:2")
     await stock_handlers.cb_take_qty(cq, state, s, erlan)
     assert cq.message.answers[0][0] == "Осталось только 1."
+    text, markup_ = cq.message.answers[1]  # заново предлагаем по новому остатку
+    assert text == "Картридж HP 85A (новый), есть 1. Сколько взять?"
+    assert kb(markup_) == [[("1", f"{tq}:1"), ("Другое", f"{tq}:other")]]
     assert await state.get_state() == StockForm.take_qty.state
     m = Msg("1")
     await stock_handlers.got_take_qty(m, state, s, erlan)
@@ -163,10 +169,11 @@ async def test_take_flow_choose_condition_and_other(s, clock_, state):
     ]
     cq = Cq(f"sk_tc:{hp.id}:used")
     await stock_handlers.cb_take_cond(cq, state, s, erlan)
+    tq = f"sk_tq:{hp.id}:used"
     assert kb(cq.message.answers[-1][1]) == [
-        [("1", "sk_tq:1"), ("2", "sk_tq:2"), ("Другое", "sk_tq:other")]
+        [("1", f"{tq}:1"), ("2", f"{tq}:2"), ("Другое", f"{tq}:other")]
     ]
-    cq = Cq("sk_tq:other")
+    cq = Cq(f"{tq}:other")
     await stock_handlers.cb_take_qty(cq, state, s, erlan)
     assert cq.message.answers[-1][0] == "Введите число от 1 до 2."
     bad = Msg("пять")
@@ -245,9 +252,56 @@ async def test_stock_dialog_routing():
 
 
 async def test_stale_buttons(s, clock_, state):
-    cq = Cq("sk_tq:1")  # нет диалога
+    cq = Cq("sk_tq:1:new:1")  # нет диалога
     await stock_handlers.stale(cq)
     assert cq.alerts == ["Диалог уже завершён"]
+
+
+def test_take_qty_callback_format():
+    ok = ("sk_tq:5:new:1", "sk_tq:5:used:9999", "sk_tq:123456789:repaired:other")
+    bad = ("sk_tq:1", "sk_tq:other", "sk_tq:5:new:0", "sk_tq:5:new:10000", "sk_tq:5:old:1")
+    assert all(re.match(stock_handlers.TAKE_QTY_RE, d) for d in ok)
+    assert not any(re.match(stock_handlers.TAKE_QTY_RE, d) for d in bad)
+
+
+async def test_old_take_button_for_other_item_is_stale(s, clock_, state):
+    coord, erlan, hp = await _setup(s)
+    mouse = await stock.create_item(s, coord, "mice", "Мышь")
+    await stock.receive(s, coord, mouse.id, "new", 5)
+    old = Cq(f"sk_take:{hp.id}")
+    await stock_handlers.cb_take(old, state, s, erlan)
+    await stock_handlers.cb_take(Cq(f"sk_take:{mouse.id}"), state, s, erlan)
+    old_two = datas(old.message.answers[-1][1])[1]
+    assert old_two == f"sk_tq:{hp.id}:new:2"
+    cq = Cq(old_two)
+    await stock_handlers.cb_take_qty(cq, state, s, erlan)
+    assert cq.alerts == ["Диалог уже завершён"] and cq.message.answers == []
+    assert (await stock.levels(s, hp.id))["new"] == 7
+    assert (await stock.levels(s, mouse.id))["new"] == 5
+    assert await state.get_state() == StockForm.take_qty.state  # диалог по мыши жив
+    cq = Cq(f"sk_tq:{mouse.id}:used:1")  # та же позиция, другое состояние
+    await stock_handlers.cb_take_qty(cq, state, s, erlan)
+    assert cq.alerts == ["Диалог уже завершён"]
+    await state.clear()
+    cq = Cq(f"sk_tq:{mouse.id}:new:1")  # нет состояния
+    await stock_handlers.cb_take_qty(cq, state, s, erlan)
+    assert cq.alerts == ["Диалог уже завершён"]
+    assert (await stock.levels(s, mouse.id))["new"] == 5
+
+
+async def test_old_min_clear_button_for_other_item_is_stale(s, clock_, state):
+    coord, _, hp = await _setup(s)
+    mouse = await stock.create_item(s, coord, "mice", "Мышь", min_qty=1)
+    old = Cq(f"sk_min:{hp.id}")
+    await stock_handlers.cb_min(old, state, s, coord)
+    assert datas(old.message.answers[-1][1]) == [f"sk_minx:{hp.id}"]
+    await stock_handlers.cb_min(Cq(f"sk_min:{mouse.id}"), state, s, coord)
+    cq = Cq(f"sk_minx:{hp.id}")
+    await stock_handlers.cb_min_clear(cq, state, s, coord)
+    assert cq.alerts == ["Диалог уже завершён"] and cq.message.answers == []
+    assert (await stock.get_item(s, hp.id)).min_qty == 3
+    assert (await stock.get_item(s, mouse.id)).min_qty == 1
+    assert await state.get_state() == StockForm.min_qty.state
 
 
 async def test_receive_and_fix(s, clock_, state):
@@ -285,7 +339,7 @@ async def test_min_and_archive(s, clock_, state):
     await stock_handlers.got_min(m, state, s, coord)
     assert m.answers[-1][0] == "🔔 Минимум для «Картридж HP 85A»: 5."
     await stock_handlers.cb_min(Cq(f"sk_min:{hp.id}"), state, s, coord)
-    cq = Cq("sk_minx")
+    cq = Cq(f"sk_minx:{hp.id}")
     await stock_handlers.cb_min_clear(cq, state, s, coord)
     assert cq.message.answers[-1][0] == "🔔 Минимум для «Картридж HP 85A» убран."
     assert (await stock.get_item(s, hp.id)).min_qty is None
@@ -298,6 +352,9 @@ async def test_min_and_archive(s, clock_, state):
     await stock_handlers.cb_arch_ok(cq, s, coord)
     assert cq.message.edits[-1][0] == "🗄 Картридж HP 85A — в архиве."
     assert (await stock.get_item(s, hp.id)).archived
+    cq = Cq(f"sk_archok:{hp.id}")  # повторное «Да» под старым вопросом
+    await stock_handlers.cb_arch_ok(cq, s, coord)
+    assert cq.alerts == ["Позиция в архиве"] and cq.message.markup_dropped
 
 
 async def test_new_item_flow_and_duplicate(s, clock_, state):
@@ -335,6 +392,19 @@ async def test_new_item_flow_and_duplicate(s, clock_, state):
     cq = Cq("sk_skipmin")
     await stock_handlers.cb_new_skip_min(cq, state, s, coord)
     assert (await stock.find_active(s, "mice", "Мышь")).min_qty is None
+
+
+async def test_new_item_duplicate_at_create_step(s, clock_, state):
+    coord, _, _ = await _setup(s)
+    await stock_handlers.cb_new_cat(Cq("sk_nc:mice"), state, coord)
+    await stock_handlers.got_new_name(Msg("Мышь USB"), state, s, coord)
+    other = await stock.create_item(s, coord, "mice", "мышь usb")  # успели раньше
+    m = Msg("1")
+    await stock_handlers.got_new_min(m, state, s, coord)
+    (t1, mk1), (t2, mk2) = m.answers
+    assert t1 == "Отменено." and mk1 == menu.main_menu(coord)
+    assert t2 == "Уже есть такая позиция." and kb(mk2) == [[("Открыть", f"sk_item:{other.id}")]]
+    assert await state.get_state() is None
 
 
 async def test_coordinator_callbacks_rejected_for_specialist(s, clock_, state):
@@ -445,6 +515,30 @@ async def test_upload_rejects_bad_files(s, clock_, state):
     await stock_handlers.got_import_file(m, state, s, coord, _Bot(data))
     assert m.answers[-1][0].startswith("Нет строк для загрузки.\nстрока 2:")
     assert await state.get_state() == StockForm.import_file.state  # можно прислать другой
+
+
+async def test_upload_confirm_failure_rolls_back_whole_import(s, clock_, state):
+    coord, _, hp = await _setup(s)
+    hp_id = hp.id  # hp меняется в откатываемой точке сохранения и истекает
+    await state.set_state(StockForm.import_confirm)
+    row = {"line": 2, "category": "cartridges", "name": hp.name, "condition": "new"}
+    await state.update_data(
+        rows=[
+            {**row, "qty": 3, "min_qty": 5},
+            {**row, "line": 3, "category": "mice", "name": "Мышь", "qty": 2, "min_qty": None},
+            # строка, которую сервис отвергнет (BadQty) уже после записи первых двух
+            {**row, "line": 4, "qty": stock.MAX_LEVEL + 1, "min_qty": None},
+        ]
+    )
+    cq = Cq("sk_uplok")
+    await stock_handlers.cb_upload_ok(cq, state, s, coord)
+    text, markup_ = cq.message.answers[-1]
+    assert text == "Не удалось загрузить — пришлите файл заново."
+    assert markup_ == menu.main_menu(coord)
+    assert await state.get_state() is None
+    assert (await stock.levels(s, hp_id))["new"] == 7
+    assert (await stock.get_item(s, hp_id)).min_qty == 3
+    assert await stock.find_active(s, "mice", "Мышь") is None
 
 
 async def test_upload_rejected_for_specialist(s, clock_, state):

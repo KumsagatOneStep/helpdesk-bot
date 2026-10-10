@@ -52,6 +52,7 @@ def upgrade() -> None:
         sa.Column("kind", sa.String(8), nullable=False),
         sa.Column("staff_id", sa.Integer(), sa.ForeignKey("staff.id"), nullable=False),
         sa.Column("created_at", TS, nullable=False),
+        sa.CheckConstraint("delta <> 0", name="ck_stock_moves_delta"),
     )
     op.create_index("ix_stock_moves_item_id", "stock_moves", ["item_id"])
     op.create_index("ix_stock_moves_created_at", "stock_moves", ["created_at"])
