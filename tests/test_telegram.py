@@ -4,10 +4,10 @@ from types import SimpleNamespace
 import pytest
 from aiogram import Dispatcher
 from aiogram.types import InlineKeyboardMarkup
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from helpdesk.db.models import Message as DbMessage
-from helpdesk.db.models import Outbox, TaskComment, TgLink
+from helpdesk.db.models import Outbox, Task, TaskComment, TgLink
 from helpdesk.tasks import service as tasks_svc
 from helpdesk.telegram import handlers
 from helpdesk.telegram.gateway import markup
@@ -15,6 +15,7 @@ from helpdesk.telegram.media import MAX_BYTES, FileTooBig, extract_content
 from helpdesk.telegram.parsing import parse_client_args
 from helpdesk.tickets import service as tickets
 from tests.factories import make_client, make_staff, make_task, make_ticket
+from tests.fakes import FakeTranscriber
 
 
 def test_parse_client_args():
@@ -493,3 +494,89 @@ async def test_close_cancel():
 )
 async def test_close_callbacks_routing(data, name):
     assert await _matched_handler(data) == name
+
+
+class _VoiceChatMessage(FakeChatMessage):
+    def __init__(self, chat_id, duration=5, **kw):
+        super().__init__(
+            chat_id,
+            voice=SimpleNamespace(duration=duration, file_size=10, file_unique_id="v"),
+            **kw,
+        )
+        self.edits = []
+
+    async def answer(self, text, **kw):
+        self.answers.append(text)
+        sent = _Sent()
+        outer = self
+
+        async def edit_text(t, reply_markup=None, **k):
+            outer.edits.append(t)
+
+        sent.edit_text = edit_text
+        return sent
+
+
+async def test_voice_comment_with_transcript_never_whatsapp(s, clock_, tmp_path):
+    c = await make_client(s)
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    await make_staff(s, tg_id=7, name="Тимур")
+    ticket = await make_ticket(s, c, status="in_progress", assignee=erlan)
+    erlan.active_ticket_id = ticket.id
+    task = await make_task(s, erlan)
+    await tasks_svc.link(s, 6, 3333, task.id)
+    await s.flush()
+    msg = _VoiceChatMessage(6, message_id=4444, reply_to_message=SimpleNamespace(message_id=3333))
+    settings = SimpleNamespace(files_dir=str(tmp_path), stt_max_seconds=120)
+    await handlers._reply_to_client(msg, s, erlan, FakeBot(), settings, FakeTranscriber("Заменил"))
+    assert msg.answers == ["⏳ Распознаю…"]
+    assert msg.edits == [f"💬 → З-{task.id} ✓\n🎤 Заменил"]
+    [cm] = (await s.scalars(select(TaskComment))).all()
+    assert (cm.kind, cm.text) == ("audio", "Заменил")
+    tg = [o.payload for o in (await s.scalars(select(Outbox))).all()]
+    assert [o["text"] for o in tg if o.get("file_kind") == "voice"] == [
+        f"💬 З-{task.id} · Ерлан (🎤): Заменил"
+    ]
+    assert (await s.scalars(select(Outbox).where(Outbox.channel == "wa"))).all() == []
+
+
+async def test_voice_comment_too_long_sent_as_audio(s, clock_, tmp_path):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    await make_staff(s, tg_id=7, name="Тимур")
+    task = await make_task(s, erlan)
+    await tasks_svc.link(s, 6, 3333, task.id)
+    msg = _VoiceChatMessage(6, duration=500, reply_to_message=SimpleNamespace(message_id=3333))
+    stt = FakeTranscriber("не должен вызываться")
+    settings = SimpleNamespace(files_dir=str(tmp_path), stt_max_seconds=120)
+    await handlers._reply_to_client(msg, s, erlan, FakeBot(), settings, stt)
+    assert stt.calls == [] and msg.answers == [f"💬 → З-{task.id} ✓"]
+    [cm] = (await s.scalars(select(TaskComment))).all()
+    assert (cm.kind, cm.text) == ("audio", None)
+
+
+class _ClosingTranscriber(FakeTranscriber):
+    """Пока «распознаём», задачу закрывают другим запросом."""
+
+    def __init__(self, s, task_id):
+        super().__init__("Заменил")
+        self.s, self.task_id = s, task_id
+
+    async def transcribe(self, path):
+        await self.s.execute(update(Task).where(Task.id == self.task_id).values(status="closed"))
+        return await super().transcribe(path)
+
+
+async def test_task_closed_during_recognition_no_comment(s, clock_, tmp_path):
+    erlan = await make_staff(s, tg_id=6, name="Ерлан")
+    await make_staff(s, tg_id=7, name="Тимур")
+    task = await make_task(s, erlan)
+    await tasks_svc.link(s, 6, 3333, task.id)
+    await s.flush()
+    msg = _VoiceChatMessage(6, reply_to_message=SimpleNamespace(message_id=3333))
+    settings = SimpleNamespace(files_dir=str(tmp_path), stt_max_seconds=120)
+    await handlers._reply_to_client(
+        msg, s, erlan, FakeBot(), settings, _ClosingTranscriber(s, task.id)
+    )
+    assert msg.edits == [f"З-{task.id} уже закрыта — комментарий не отправлен."]
+    assert (await s.scalars(select(TaskComment))).all() == []
+    assert (await s.scalars(select(Outbox))).all() == []

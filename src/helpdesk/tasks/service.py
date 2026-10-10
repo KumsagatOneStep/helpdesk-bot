@@ -11,6 +11,8 @@ from helpdesk.delivery.outbox import Buttons
 from helpdesk.tasks import render, rules
 from helpdesk.tickets.service import TG_FILE_KIND
 
+MAX_CAPTION = 1024  # лимит подписи к файлу в Telegram
+
 
 class NoCoordinator(Exception):
     """Задача типа «Координатор», а активных координаторов нет."""
@@ -219,6 +221,7 @@ async def comment(
     text: str | None,
     file_path: str | None = None,
     file_name: str | None = None,
+    voice: bool = False,
 ) -> TaskComment | None:
     if t.status == "closed":
         return None
@@ -231,8 +234,10 @@ async def comment(
         file_name=file_name,
     )
     s.add(c)
-    head = f"💬 {render.number(t)} · {staff.name}"
+    head = f"💬 {render.number(t)} · {staff.name}{' (🎤)' if voice else ''}"
     body = f"{head}: {text}" if text else head
+    # подпись к файлу Telegram режет на 1024 — длинный текст отдельным сообщением
+    split = bool(file_path) and len(body) > MAX_CAPTION
     for st in await rules.participants(s, t):
         if st.id == staff.id:
             continue
@@ -240,12 +245,12 @@ async def comment(
             outbox.tg_send(
                 s,
                 st.tg_chat_id,
-                text=body,
+                text=head if split else body,
                 file_path=file_path,
                 file_kind=TG_FILE_KIND[kind],
                 task_id=t.id,
             )
-        else:
+        if split or not file_path:
             outbox.tg_send(s, st.tg_chat_id, text=body, task_id=t.id)
     await s.flush()
     return c

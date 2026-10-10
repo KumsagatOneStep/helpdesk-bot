@@ -17,7 +17,7 @@ from helpdesk.stats import service as stats
 from helpdesk.tasks import render as task_render
 from helpdesk.tasks import rules as task_rules
 from helpdesk.tasks import service as tasks
-from helpdesk.telegram import menu, task_handlers
+from helpdesk.telegram import menu, task_handlers, voice
 from helpdesk.telegram.filters import ID_DATA as _ID_DATA
 from helpdesk.telegram.filters import IsActive, IsAdmin
 from helpdesk.telegram.filters import arg_id as _arg_id
@@ -512,7 +512,9 @@ async def cb_staff_action(cq: CallbackQuery, s, staff: Staff):
 # ---------- ответы пользователю ----------
 
 
-async def _comment_task(message: Message, s, staff: Staff, bot: Bot, settings: Settings, t) -> None:
+async def _comment_task(
+    message: Message, s, staff: Staff, bot: Bot, settings: Settings, t, stt=None
+) -> None:
     n = task_render.number(t)
     if not task_rules.can_see(staff, t):
         await message.answer("Задача недоступна.")
@@ -520,31 +522,51 @@ async def _comment_task(message: Message, s, staff: Staff, bot: Bot, settings: S
     if t.status == "closed":
         await message.answer(f"{n} уже закрыта — комментарий не отправлен.")
         return
+    is_voice = bool(message.voice or message.audio)
+    progress = None
     try:
-        content = await extract_content(bot, message, settings.files_dir)
+        if is_voice and stt is not None:
+            r = await voice.recognize(message, bot, settings, stt, keep_file=True)
+            content, progress = r.content, r.progress
+            text = r.text or content.text
+        else:
+            content = await extract_content(bot, message, settings.files_dir)
+            text = content.text
     except FileTooBig:
         await message.answer("Файл больше 20 МБ — бот не может его скачать. Отправьте ссылкой.")
         return
-    await tasks.comment(
+    # распознавание идёт до минуты — задачу могли закрыть, перечитываем
+    await s.refresh(t)
+    c = await tasks.comment(
         s,
         t,
         staff,
         kind=content.kind,
-        text=content.text,
+        text=text,
         file_path=content.file_path,
         file_name=content.file_name,
+        voice=is_voice,
     )
-    await tasks.link(s, staff.tg_chat_id, message.message_id, t.id)
-    await message.answer(f"💬 → {n} ✓")
+    if c is None:
+        reply = f"{n} уже закрыта — комментарий не отправлен."
+    else:
+        await tasks.link(s, staff.tg_chat_id, message.message_id, t.id)
+        reply = f"💬 → {n} ✓" + (f"\n🎤 {text}" if is_voice and text else "")
+    if progress is not None:
+        await progress.edit_text(reply)
+    else:
+        await message.answer(reply)
 
 
-async def _reply_to_client(message: Message, s, staff: Staff, bot: Bot, settings: Settings):
+async def _reply_to_client(
+    message: Message, s, staff: Staff, bot: Bot, settings: Settings, stt=None
+):
     reply_to = message.reply_to_message.message_id if message.reply_to_message else None
     if reply_to is not None:
         # сначала задачи: ответ на карточку задачи никогда не уходит в WhatsApp
         task = await tasks.task_for_reply(s, staff.tg_chat_id, reply_to)
         if task is not None:
-            await _comment_task(message, s, staff, bot, settings, task)
+            await _comment_task(message, s, staff, bot, settings, task, stt)
             return
     t, err = await tickets.resolve_target(s, staff, reply_to)
     if t is None:
@@ -564,13 +586,13 @@ async def _reply_to_client(message: Message, s, staff: Staff, bot: Bot, settings
 
 
 @router.message(IsActive(), F.text.func(menu.is_client_reply_text))
-async def staff_text(message: Message, s, staff: Staff, bot: Bot, settings: Settings):
-    await _reply_to_client(message, s, staff, bot, settings)
+async def staff_text(message: Message, s, staff: Staff, bot: Bot, settings: Settings, stt):
+    await _reply_to_client(message, s, staff, bot, settings, stt)
 
 
 @router.message(IsActive(), F.photo | F.document | F.voice | F.audio | F.video | F.video_note)
-async def staff_media(message: Message, s, staff: Staff, bot: Bot, settings: Settings):
-    await _reply_to_client(message, s, staff, bot, settings)
+async def staff_media(message: Message, s, staff: Staff, bot: Bot, settings: Settings, stt):
+    await _reply_to_client(message, s, staff, bot, settings, stt)
 
 
 # ---------- всё остальное ----------

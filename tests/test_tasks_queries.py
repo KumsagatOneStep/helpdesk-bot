@@ -107,3 +107,56 @@ async def test_deliver_queue_skips_tasks_already_carded(s, clock_):
     assert await tasks.deliver_queue_to(s, tima) == 0
     assert await payloads(s, "tg") == []
     assert await tasks.deliver_queue_to(s, coord) == 1
+
+
+async def test_voice_comment_caption(s, clock_):
+    erlan = await make_staff(s, tg_id=1, name="Ерлан")
+    await make_staff(s, tg_id=2, name="Тимур")
+    t = await make_task(s, erlan)
+    await tasks.comment(
+        s,
+        t,
+        erlan,
+        kind="audio",
+        text="Заменил",
+        file_path="/f/v.ogg",
+        file_name="voice.ogg",
+        voice=True,
+    )
+    [p] = await payloads(s, "tg")
+    assert (p["text"], p["file_kind"]) == (f"💬 З-{t.id} · Ерлан (🎤): Заменил", "voice")
+    await clear_outbox(s)
+    await tasks.comment(
+        s,
+        t,
+        erlan,
+        kind="audio",
+        text=None,
+        file_path="/f/v.ogg",
+        file_name="voice.ogg",
+        voice=True,
+    )
+    [p] = await payloads(s, "tg")
+    assert p["text"] == f"💬 З-{t.id} · Ерлан (🎤)"
+
+
+async def test_long_caption_split_into_file_and_text(s, clock_):
+    erlan = await make_staff(s, tg_id=1, name="Ерлан")
+    await make_staff(s, tg_id=2, name="Тимур")
+    t = await make_task(s, erlan)
+    long = "я" * 1500
+    await tasks.comment(
+        s,
+        t,
+        erlan,
+        kind="audio",
+        text=long,
+        file_path="/f/v.ogg",
+        file_name="voice.ogg",
+        voice=True,
+    )
+    head = f"💬 З-{t.id} · Ерлан (🎤)"
+    assert [(p["file_kind"], p["text"]) for p in await payloads(s, "tg")] == [
+        ("voice", head),
+        (None, f"{head}: {long}"),
+    ]
