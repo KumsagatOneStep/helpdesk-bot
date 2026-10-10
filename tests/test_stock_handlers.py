@@ -246,3 +246,118 @@ async def test_stale_buttons(s, clock_, state):
     cq = Cq("sk_tq:1")  # нет диалога
     await stock_handlers.stale(cq)
     assert cq.alerts == ["Диалог уже завершён"]
+
+
+async def test_receive_and_fix(s, clock_, state):
+    coord, _, hp = await _setup(s)
+    cq = Cq(f"sk_in:{hp.id}")
+    await stock_handlers.cb_in(cq, state, s, coord)
+    assert kb(cq.message.answers[-1][1]) == [
+        [
+            ("новые", f"sk_ic:{hp.id}:new"),
+            ("б/у", f"sk_ic:{hp.id}:used"),
+            ("после ремонта", f"sk_ic:{hp.id}:repaired"),
+        ]
+    ]
+    await stock_handlers.cb_in_cond(Cq(f"sk_ic:{hp.id}:repaired"), state, s, coord)
+    assert await state.get_state() == StockForm.in_qty.state
+    bad = Msg("1001")
+    await stock_handlers.got_in_qty(bad, state, s, coord)
+    assert bad.answers[-1][0] == "Введите число от 1 до 1000."
+    m = Msg("2")
+    await stock_handlers.got_in_qty(m, state, s, coord)
+    assert m.answers[-1][0] == "➕ Картридж HP 85A +2 (после ремонта). Теперь 2."
+    await stock_handlers.cb_fix(Cq(f"sk_fix:{hp.id}"), state, s, coord)
+    await stock_handlers.cb_fix_cond(Cq(f"sk_fc:{hp.id}:new"), state, s, coord)
+    assert await state.get_state() == StockForm.fix_qty.state
+    m = Msg("0")
+    await stock_handlers.got_fix_qty(m, state, s, coord)
+    assert m.answers[-1][0] == "✏️ Картридж HP 85A (новый): теперь 0."
+    assert await stock.levels(s, hp.id) == {"new": 0, "used": 0, "repaired": 2}
+
+
+async def test_min_and_archive(s, clock_, state):
+    coord, _, hp = await _setup(s)
+    await stock_handlers.cb_min(Cq(f"sk_min:{hp.id}"), state, s, coord)
+    m = Msg("5")
+    await stock_handlers.got_min(m, state, s, coord)
+    assert m.answers[-1][0] == "🔔 Минимум для «Картридж HP 85A»: 5."
+    await stock_handlers.cb_min(Cq(f"sk_min:{hp.id}"), state, s, coord)
+    cq = Cq("sk_minx")
+    await stock_handlers.cb_min_clear(cq, state, s, coord)
+    assert cq.message.answers[-1][0] == "🔔 Минимум для «Картридж HP 85A» убран."
+    assert (await stock.get_item(s, hp.id)).min_qty is None
+    cq = Cq(f"sk_arch:{hp.id}")
+    await stock_handlers.cb_arch(cq, s, coord)
+    assert kb(cq.message.answers[-1][1]) == [
+        [("Да, в архив", f"sk_archok:{hp.id}"), ("Отмена", "sk_cancel")]
+    ]
+    cq = Cq(f"sk_archok:{hp.id}")
+    await stock_handlers.cb_arch_ok(cq, s, coord)
+    assert cq.message.edits[-1][0] == "🗄 Картридж HP 85A — в архиве."
+    assert (await stock.get_item(s, hp.id)).archived
+
+
+async def test_new_item_flow_and_duplicate(s, clock_, state):
+    coord, _, hp = await _setup(s)
+    cq = Cq("sk_new")
+    await stock_handlers.cb_new(cq, state, coord)
+    assert ("🖱 Мыши", "sk_nc:mice") in [b for row in kb(cq.message.answers[-1][1]) for b in row]
+    await stock_handlers.cb_new_cat(Cq("sk_nc:cartridges"), state, coord)
+    assert await state.get_state() == StockForm.new_name.state
+    dup = Msg("картридж hp 85a")
+    await stock_handlers.got_new_name(dup, state, s, coord)
+    assert dup.answers[-1][0] == "Уже есть: Картридж HP 85A"
+    assert kb(dup.answers[-1][1]) == [[("Открыть", f"sk_item:{hp.id}")]]
+    assert await state.get_state() is None
+    await stock_handlers.cb_new_cat(Cq("sk_nc:cartridges"), state, coord)
+    long = Msg("x" * 201)
+    await stock_handlers.got_new_name(long, state, s, coord)
+    assert long.answers[-1][0] == "Название от 1 до 200 символов."
+    await stock_handlers.got_new_name(Msg("Canon 728"), state, s, coord)
+    assert await state.get_state() == StockForm.new_min.state
+    m = Msg("2")
+    await stock_handlers.got_new_min(m, state, s, coord)
+    item = await stock.find_active(s, "cartridges", "canon 728")
+    assert item.min_qty == 2
+    text, markup_ = m.answers[-1]
+    assert text == "Позиция «Canon 728» создана. Что пришло?"
+    assert datas(markup_) == [
+        f"sk_ic:{item.id}:new",
+        f"sk_ic:{item.id}:used",
+        f"sk_ic:{item.id}:repaired",
+        f"sk_item:{item.id}",
+    ]
+    await stock_handlers.cb_new_cat(Cq("sk_nc:mice"), state, coord)
+    await stock_handlers.got_new_name(Msg("Мышь"), state, s, coord)
+    cq = Cq("sk_skipmin")
+    await stock_handlers.cb_new_skip_min(cq, state, s, coord)
+    assert (await stock.find_active(s, "mice", "Мышь")).min_qty is None
+
+
+async def test_coordinator_callbacks_rejected_for_specialist(s, clock_, state):
+    _, erlan, hp = await _setup(s)
+    calls = [
+        (stock_handlers.cb_in, Cq(f"sk_in:{hp.id}"), (state, s, erlan)),
+        (stock_handlers.cb_in_cond, Cq(f"sk_ic:{hp.id}:new"), (state, s, erlan)),
+        (stock_handlers.cb_fix, Cq(f"sk_fix:{hp.id}"), (state, s, erlan)),
+        (stock_handlers.cb_fix_cond, Cq(f"sk_fc:{hp.id}:new"), (state, s, erlan)),
+        (stock_handlers.cb_min, Cq(f"sk_min:{hp.id}"), (state, s, erlan)),
+        (stock_handlers.cb_arch, Cq(f"sk_arch:{hp.id}"), (s, erlan)),
+        (stock_handlers.cb_arch_ok, Cq(f"sk_archok:{hp.id}"), (s, erlan)),
+        (stock_handlers.cb_new, Cq("sk_new"), (state, erlan)),
+        (stock_handlers.cb_new_cat, Cq("sk_nc:mice"), (state, erlan)),
+    ]
+    for fn, cq, args in calls:
+        await fn(cq, *args)
+        assert cq.alerts == ["Только для координатора"], fn.__name__
+        assert cq.message.answers == [] and cq.message.edits == [], fn.__name__
+    assert await state.get_state() is None
+    assert not (await stock.get_item(s, hp.id)).archived
+    # текстовый ввод в «координаторском» состоянии от специалиста тоже не проходит
+    await state.set_state(StockForm.in_qty)
+    await state.update_data(item_id=hp.id, condition="new")
+    m = Msg("5")
+    await stock_handlers.got_in_qty(m, state, s, erlan)
+    assert m.answers[-1][0] == "Только для координатора."
+    assert (await stock.levels(s, hp.id))["new"] == 7

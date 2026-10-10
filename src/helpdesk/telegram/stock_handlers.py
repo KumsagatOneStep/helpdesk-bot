@@ -256,6 +256,290 @@ async def cb_cancel(cq: CallbackQuery, state: FSMContext, staff: Staff):
     await cq.answer()
 
 
+# ── Координатор ────────────────────────────────────────────────────────
+
+
+def _cond_buttons(prefix: str, item_id: int):
+    return [[(label, f"{prefix}:{item_id}:{c}") for c, label in CONDITIONS.items()]]
+
+
+async def _coord_text(message: Message, state: FSMContext, staff: Staff) -> bool:
+    """Текстовый шаг координаторского диалога: специалиста не пускаем."""
+    if stock.is_coordinator(staff):
+        return True
+    await state.clear()
+    await message.answer(f"{ONLY_COORD}.", reply_markup=menu.main_menu(staff))
+    return False
+
+
+@router.callback_query(F.data.regexp(ID_DATA.format("sk_in")), IsActive())
+async def cb_in(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
+    if await _deny(cq, staff) or (row := await _active_row(cq, s, arg_id(cq))) is None:
+        return
+    await state.clear()
+    await cq.message.answer(
+        f"{row.item.name}: что пришло?", reply_markup=markup(_cond_buttons("sk_ic", row.item.id))
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.regexp(rf"^sk_ic:\d{{1,9}}:{COND_RE}$"), IsActive())
+async def cb_in_cond(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
+    _, item_id, condition = cq.data.split(":")
+    if await _deny(cq, staff) or (row := await _active_row(cq, s, int(item_id))) is None:
+        return
+    await _drop_markup(cq)
+    await state.clear()
+    await state.set_state(StockForm.in_qty)
+    await state.update_data(item_id=row.item.id, condition=condition)
+    await cq.message.answer(
+        f"{row.item.name} ({CONDITION_ONE[condition]}): сколько пришло? 1–{stock.MAX_IN}",
+        reply_markup=menu.cancel_menu(),
+    )
+    await cq.answer()
+
+
+@router.message(StockForm.in_qty, IsActive(), F.text.func(menu.is_client_reply_text))
+async def got_in_qty(message: Message, state: FSMContext, s, staff: Staff):
+    if not await _coord_text(message, state, staff):
+        return
+    qty = parse_int(message.text, 1, stock.MAX_IN)
+    if qty is None:
+        await message.answer(f"Введите число от 1 до {stock.MAX_IN}.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    try:
+        now = await stock.receive(s, staff, data["item_id"], data["condition"], qty)
+    except stock.Archived:
+        await message.answer("Позиция в архиве.", reply_markup=menu.main_menu(staff))
+        return
+    item = await stock.get_item(s, data["item_id"])
+    await message.answer(
+        f"➕ {item.name} +{qty} ({CONDITION_ONE[data['condition']]}). Теперь {now}.",
+        reply_markup=menu.main_menu(staff),
+    )
+
+
+@router.callback_query(F.data.regexp(ID_DATA.format("sk_fix")), IsActive())
+async def cb_fix(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
+    if await _deny(cq, staff) or (row := await _active_row(cq, s, arg_id(cq))) is None:
+        return
+    await state.clear()
+    await cq.message.answer(
+        f"{row.item.name}: какое состояние исправить?",
+        reply_markup=markup(_cond_buttons("sk_fc", row.item.id)),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.regexp(rf"^sk_fc:\d{{1,9}}:{COND_RE}$"), IsActive())
+async def cb_fix_cond(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
+    _, item_id, condition = cq.data.split(":")
+    if await _deny(cq, staff) or (row := await _active_row(cq, s, int(item_id))) is None:
+        return
+    await _drop_markup(cq)
+    await state.clear()
+    await state.set_state(StockForm.fix_qty)
+    await state.update_data(item_id=row.item.id, condition=condition)
+    await cq.message.answer(
+        f"{row.item.name} ({CONDITION_ONE[condition]}): сейчас {row.levels[condition]}. "
+        f"Сколько на самом деле? 0–{stock.MAX_LEVEL}",
+        reply_markup=menu.cancel_menu(),
+    )
+    await cq.answer()
+
+
+@router.message(StockForm.fix_qty, IsActive(), F.text.func(menu.is_client_reply_text))
+async def got_fix_qty(message: Message, state: FSMContext, s, staff: Staff):
+    if not await _coord_text(message, state, staff):
+        return
+    qty = parse_int(message.text, 0, stock.MAX_LEVEL)
+    if qty is None:
+        await message.answer(f"Введите число от 0 до {stock.MAX_LEVEL}.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    try:
+        await stock.set_level(s, staff, data["item_id"], data["condition"], qty)
+    except stock.Archived:
+        await message.answer("Позиция в архиве.", reply_markup=menu.main_menu(staff))
+        return
+    item = await stock.get_item(s, data["item_id"])
+    await message.answer(
+        f"✏️ {item.name} ({CONDITION_ONE[data['condition']]}): теперь {qty}.",
+        reply_markup=menu.main_menu(staff),
+    )
+
+
+@router.callback_query(F.data.regexp(ID_DATA.format("sk_min")), IsActive())
+async def cb_min(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
+    if await _deny(cq, staff) or (row := await _active_row(cq, s, arg_id(cq))) is None:
+        return
+    await state.clear()
+    await state.set_state(StockForm.min_qty)
+    await state.update_data(item_id=row.item.id)
+    now = row.item.min_qty if row.item.min_qty is not None else "не задан"
+    await cq.message.answer(
+        f"Минимум для «{row.item.name}» (сейчас {now}). Введите число 0–{stock.MAX_LEVEL}:",
+        reply_markup=markup([[("Убрать", "sk_minx")]]),
+    )
+    await cq.answer()
+
+
+async def _apply_min(message, state: FSMContext, s, staff: Staff, value: int | None) -> None:
+    data = await state.get_data()
+    await state.clear()
+    try:
+        await stock.set_min(s, staff, data["item_id"], value)
+    except stock.Archived:
+        await message.answer("Позиция в архиве.", reply_markup=menu.main_menu(staff))
+        return
+    item = await stock.get_item(s, data["item_id"])
+    text = (
+        f"🔔 Минимум для «{item.name}»: {value}."
+        if value is not None
+        else f"🔔 Минимум для «{item.name}» убран."
+    )
+    await message.answer(text, reply_markup=menu.main_menu(staff))
+
+
+@router.message(StockForm.min_qty, IsActive(), F.text.func(menu.is_client_reply_text))
+async def got_min(message: Message, state: FSMContext, s, staff: Staff):
+    if not await _coord_text(message, state, staff):
+        return
+    value = parse_int(message.text, 0, stock.MAX_LEVEL)
+    if value is None:
+        await message.answer(f"Введите число от 0 до {stock.MAX_LEVEL} или нажмите «Убрать».")
+        return
+    await _apply_min(message, state, s, staff, value)
+
+
+@router.callback_query(StockForm.min_qty, F.data == "sk_minx", IsActive())
+async def cb_min_clear(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
+    if await _deny(cq, staff):
+        return
+    await _drop_markup(cq)
+    await _apply_min(cq.message, state, s, staff, None)
+    await cq.answer()
+
+
+@router.callback_query(F.data.regexp(ID_DATA.format("sk_arch")), IsActive())
+async def cb_arch(cq: CallbackQuery, s, staff: Staff):
+    if await _deny(cq, staff) or (row := await _active_row(cq, s, arg_id(cq))) is None:
+        return
+    await cq.message.answer(
+        f"Убрать «{row.item.name}» в архив? История выдач сохранится.",
+        reply_markup=markup(
+            [[("Да, в архив", f"sk_archok:{row.item.id}"), ("Отмена", "sk_cancel")]]
+        ),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.regexp(ID_DATA.format("sk_archok")), IsActive())
+async def cb_arch_ok(cq: CallbackQuery, s, staff: Staff):
+    if await _deny(cq, staff):
+        return
+    try:
+        item = await stock.archive(s, staff, arg_id(cq))
+    except stock.Archived:
+        await cq.answer("Позиция в архиве", show_alert=True)
+        return
+    await _edit(cq, f"🗄 {item.name} — в архиве.", None)
+    await cq.answer()
+
+
+@router.callback_query(F.data == "sk_new", IsActive())
+async def cb_new(cq: CallbackQuery, state: FSMContext, staff: Staff):
+    if await _deny(cq, staff):
+        return
+    await state.clear()
+    cats = [(label, f"sk_nc:{code}") for code, label in CATEGORIES.items()]
+    rows = [cats[i : i + 2] for i in range(0, len(cats), 2)]
+    await cq.message.answer("Новая позиция — категория:", reply_markup=markup(rows))
+    await cq.answer()
+
+
+@router.callback_query(F.data.regexp(r"^sk_nc:[a-z]{1,24}$"), IsActive())
+async def cb_new_cat(cq: CallbackQuery, state: FSMContext, staff: Staff):
+    if await _deny(cq, staff):
+        return
+    code = cq.data.split(":")[1]
+    if code not in CATEGORIES:
+        await cq.answer("Кнопка устарела", show_alert=True)
+        return
+    await _drop_markup(cq)
+    await state.clear()
+    await state.set_state(StockForm.new_name)
+    await state.update_data(category=code)
+    await cq.message.answer(
+        f"{CATEGORIES[code]}: название позиции?", reply_markup=menu.cancel_menu()
+    )
+    await cq.answer()
+
+
+@router.message(StockForm.new_name, IsActive(), F.text.func(menu.is_client_reply_text))
+async def got_new_name(message: Message, state: FSMContext, s, staff: Staff):
+    if not await _coord_text(message, state, staff):
+        return
+    name = stock.clean_name(message.text)
+    if not 1 <= len(name) <= 200:
+        await message.answer("Название от 1 до 200 символов.")
+        return
+    category = (await state.get_data())["category"]
+    if dup := await stock.find_active(s, category, name):
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=menu.main_menu(staff))
+        await message.answer(
+            f"Уже есть: {dup.name}", reply_markup=markup([[("Открыть", f"sk_item:{dup.id}")]])
+        )
+        return
+    await state.update_data(name=name)
+    await state.set_state(StockForm.new_min)
+    await message.answer(
+        f"Минимум для «{name}»? Число 0–{stock.MAX_LEVEL} или «Пропустить».",
+        reply_markup=markup([[("Пропустить", "sk_skipmin")]]),
+    )
+
+
+async def _create(message, state: FSMContext, s, staff: Staff, min_qty: int | None) -> None:
+    data = await state.get_data()
+    await state.clear()
+    try:
+        item = await stock.create_item(s, staff, data["category"], data["name"], min_qty)
+    except stock.DuplicateName as e:
+        await message.answer(
+            "Уже есть такая позиция.", reply_markup=markup([[("Открыть", f"sk_item:{e.item_id}")]])
+        )
+        return
+    await message.answer("Готово.", reply_markup=menu.main_menu(staff))
+    buttons = _cond_buttons("sk_ic", item.id) + [[("Без прихода — открыть", f"sk_item:{item.id}")]]
+    await message.answer(
+        f"Позиция «{item.name}» создана. Что пришло?", reply_markup=markup(buttons)
+    )
+
+
+@router.message(StockForm.new_min, IsActive(), F.text.func(menu.is_client_reply_text))
+async def got_new_min(message: Message, state: FSMContext, s, staff: Staff):
+    if not await _coord_text(message, state, staff):
+        return
+    value = parse_int(message.text, 0, stock.MAX_LEVEL)
+    if value is None:
+        await message.answer(f"Введите число от 0 до {stock.MAX_LEVEL} или нажмите «Пропустить».")
+        return
+    await _create(message, state, s, staff, value)
+
+
+@router.callback_query(StockForm.new_min, F.data == "sk_skipmin", IsActive())
+async def cb_new_skip_min(cq: CallbackQuery, state: FSMContext, s, staff: Staff):
+    if await _deny(cq, staff):
+        return
+    await _drop_markup(cq)
+    await _create(cq.message, state, s, staff, None)
+    await cq.answer()
+
+
 # Обработчики задач 5–6 вставлять ВЫШЕ этой строки: stray_input и stale — последние.
 
 
